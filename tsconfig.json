@@ -1,0 +1,15 @@
+{
+	"compilerOptions": {
+		"target": "ESNext",
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"strict": true,
+		"noUncheckedIndexedAccess": true,
+		"exactOptionalPropertyTypes": false,
+		"skipLibCheck": true,
+		"noEmit": true,
+		"types": ["bun"]
+	},
+	"include": ["src/core/**/*.ts", "tests/**/*.ts"],
+	"exclude": ["tests/omp-adapter"]
+}

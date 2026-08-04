@@ -1,0 +1,59 @@
+# omp-auto-router 示例配置
+# 复制到 ~/.omp/agent/auto-router.yml 使用；项目级覆盖放 <repo>/.omp/auto-router.yml
+
+active: premium
+
+profiles:
+  premium:
+    description: 日常开发，订阅额度优先
+    defaultTier: standard
+    tiers:
+      trivial:
+        thinking: low
+        targets:
+          - { provider: deepseek, model: deepseek-v4-flash, billing: per-token }
+          - { provider: ollama, model: glm-5.1:cloud }
+      simple:
+        thinking: low
+        targets:
+          - { provider: deepseek, model: deepseek-v4-flash, billing: per-token }
+      standard:
+        thinking: medium
+        targets:
+          - { provider: anthropic, model: claude-sonnet-4-5 }
+          - { provider: openai-codex, model: gpt-5.5 }
+          - { provider: google, model: gemini-3.1-pro, billing: per-token }
+      complex:
+        thinking: high
+        targets:
+          - { provider: anthropic, model: claude-opus-4-5 }
+          - { provider: google, model: gemini-3.1-pro, billing: per-token }
+    budgets:
+      google: { amount: 20, monthly: true }
+    rules:
+      - type: exclude-provider
+        providers: [google]
+        when: { hourStart: 23, hourEnd: 7 }   # 夜间优先省配额
+  economy:
+    description: 省钱模式
+    defaultTier: standard
+    tiers:
+      standard:
+        thinking: low
+        targets:
+          - { provider: deepseek, model: deepseek-v4-flash, billing: per-token }
+  offline:
+    description: 纯本地
+    defaultTier: standard
+    tiers:
+      standard:
+        targets:
+          - { provider: ollama, model: qwen3-coder }
+
+aliases:
+  eco: [economy]
+  fast: [economy]
+
+activate:
+  - { path: ~/work, profile: premium }
+  - { path: ~/oss, profile: economy }
