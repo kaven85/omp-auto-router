@@ -404,7 +404,7 @@ roadmap blueprint strategy decompose modularize modularise restructure
 | `/auto-router rate good\|bad [comment]` | 决策反馈（持久化） | `/auto-router rate good 选得好` |
 | `/auto-router help` | 全部子命令的说明 + 示例 | `/auto-router help` |
 
-请求内钉层：`@fast` / `@swe` / `@reasoning` / `@long` / `@vision` / `@profile:<name>`（见下节）。
+请求内钉层：`@fast` / `@swe` / `@reasoning` / `@long` / `@vision` / `@profile:<name>`（见上节）。
 
 ## 与 omp 的集成点
 
@@ -427,7 +427,7 @@ roadmap blueprint strategy decompose modularize modularise restructure
 - **路径防护**：`state-store` 拒绝含路径分隔符 / dot-escape 的名字（`assertBareName`），配置路径为固定常量拼接。
 - **有界持久化**：`ratings.json` 默认保留最近 1000 条评分（`FeedbackTracker.maxEntries`），避免随使用无限增长。
 
-上述规则集中在 `src/omp-adapter/redact.ts`，是"防止泄露的第一道纪律"之外的纵深防御，不是替代品。
+密钥脱敏与白名单规则集中在 `src/omp-adapter/redact.ts`（路径防护在 `src/core/state-store.ts`），是"防止泄露的第一道纪律"之外的纵深防御，不是替代品。
 
 ## 验证与排障
 
