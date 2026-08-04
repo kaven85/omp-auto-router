@@ -1,5 +1,7 @@
 # omp-auto-router
 
+简体中文 | [English](README.en.md)
+
 面向 [omp (Oh My Pi)](https://github.com/can1357/oh-my-pi) 的 profile 化、复杂度感知自动路由插件：一套模型选择策略（profile），按任务复杂度自动挑选不同模型，带同请求 failover、预算/配额感知、可解释决策。
 
 基于 [pi-auto-router](https://github.com/danialranjha/pi-auto-router) 的设计思想移植，但做了 omp 原生适配与解耦重构。
