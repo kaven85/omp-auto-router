@@ -302,6 +302,19 @@ function runHelp(): string {
 	]);
 }
 
+/**
+ * Active profile for display: the session's current auto-router model wins
+ * (that is what actually routes — switching via /model bypasses the
+ * registry); fall back to the registry (config.active / path activation).
+ */
+function activeProfileName(state: AdapterState): string {
+	const current = state.ctx?.models.current();
+	if (current?.provider === "auto-router" && state.registry.profile(current.id) !== undefined) {
+		return current.id;
+	}
+	return state.registry.current();
+}
+
 async function runCommand(rawArgs: string, deps: CommandDeps, ctx: OmpExtensionContext): Promise<void> {
 	const [sub, ...rest] = rawArgs.trim().split(/\s+/);
 	const arg = rest.join(" ");
@@ -316,7 +329,8 @@ async function runCommand(rawArgs: string, deps: CommandDeps, ctx: OmpExtensionC
 	switch (sub ?? "") {
 		case "":
 		case "status": {
-			const active = state.registry.active();
+			const activeName = activeProfileName(state);
+			const active = { name: activeName, profile: state.registry.profile(activeName)! };
 			const last = state.lastDecision;
 			ctx.ui.notify(
 				lines([
@@ -331,18 +345,19 @@ async function runCommand(rawArgs: string, deps: CommandDeps, ctx: OmpExtensionC
 			return;
 		}
 		case "profiles": {
+			const activeName = activeProfileName(state);
 			ctx.ui.notify(
 				lines(
 					state.registry
 						.list()
-						.map((p) => `${p.isActive ? "▶" : " "} ${p.name}${p.description ? ` — ${p.description}` : ""}`),
+						.map((p) => `${p.name === activeName ? "▶" : " "} ${p.name}${p.description ? ` — ${p.description}` : ""}`),
 				),
 				"info",
 			);
 			return;
 		}
 		case "current": {
-			ctx.ui.notify(state.registry.current(), "info");
+			ctx.ui.notify(activeProfileName(state), "info");
 			return;
 		}
 		case "use": {
@@ -378,7 +393,7 @@ async function runCommand(rawArgs: string, deps: CommandDeps, ctx: OmpExtensionC
 			return;
 		}
 		case "list": {
-			const profile = state.registry.active().profile;
+			const profile = state.registry.profile(activeProfileName(state))!;
 			const rows: string[] = [];
 			for (const [tier, tierCfg] of Object.entries(profile.tiers)) {
 				const targets = tierCfg.targets
@@ -390,7 +405,7 @@ async function runCommand(rawArgs: string, deps: CommandDeps, ctx: OmpExtensionC
 			return;
 		}
 		case "show": {
-			const target = arg || state.registry.current();
+			const target = arg || activeProfileName(state);
 			const profile = state.registry.profile(target);
 			if (!profile) {
 				ctx.ui.notify(`unknown profile: ${target}`, "error");
