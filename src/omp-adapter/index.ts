@@ -16,17 +16,60 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import type { AdapterState } from "./state";
-import { createAdapterState, refreshModels } from "./state";
+import { createAdapterState, refreshModels, collectProfileBudgets, persistTrackers } from "./state";
 import { agentDir, loadAdapterConfigSync } from "./config";
 import { registerCommands } from "./commands";
 import { createStreamHandler } from "./router";
+import { createHostPorts, QUOTA_REFRESH_MS } from "./host-ports";
 import type { OmpExtensionApi, OmpExtensionContext, OmpProviderConfig } from "./omp-api";
-import { pickSafeEvent } from "./redact";
+import { pickSafeEvent, redactSecrets } from "./redact";
 import type { RoutingDecision } from "../core/types";
 
 /** Placeholder endpoint/key: the virtual provider never sends requests itself. */
 const VIRTUAL_BASE_URL = "http://127.0.0.1:0";
 const VIRTUAL_API_KEY = "OMP_AUTO_ROUTER_VIRTUAL_KEY";
+
+/** Handle of the background quota-refresh timer; at most one runs per process. */
+let quotaRefreshTimer: unknown;
+
+/**
+ * Refresh UVI quota snapshots in the background so requests never block on
+ * the auth chain when the cache just expired. Managed by the host ctx so the
+ * timer dies with the session (omp requirement).
+ */
+function startQuotaRefresh(stateRef: { current: AdapterState | undefined }, pi: OmpExtensionApi, ctx: OmpExtensionContext): void {
+	stopQuotaRefresh(ctx);
+	const state = stateRef.current;
+	if (!state?.uviEnabled) return;
+	quotaRefreshTimer = ctx.setInterval(() => {
+		const current = stateRef.current;
+		if (!current?.ctx) return;
+		const providers = new Set<string>();
+		for (const entry of current.registry.list()) {
+			const profile = current.registry.profile(entry.name);
+			if (!profile) continue;
+			for (const tier of Object.values(profile.tiers)) {
+				for (const target of tier.targets ?? []) providers.add(target.provider);
+			}
+		}
+		if (providers.size === 0) return;
+		void createHostPorts(pi, current.ctx, current)
+			.fetchQuota([...providers])
+			.then((snapshots) => {
+				current.quotaCache = { at: Date.now(), data: snapshots };
+			})
+			.catch(() => {
+				// best-effort background refresh; request-path refresh retries
+			});
+	}, QUOTA_REFRESH_MS);
+}
+
+function stopQuotaRefresh(ctx: OmpExtensionContext): void {
+	if (quotaRefreshTimer !== undefined) {
+		ctx.clearTimer(quotaRefreshTimer);
+		quotaRefreshTimer = undefined;
+	}
+}
 
 export default function autoRouterExtension(pi: OmpExtensionApi): void {
 	pi.setLabel("Auto Router");
@@ -84,9 +127,9 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 			const cwd2 = current?.cwd ?? process.cwd();
 			const loaded2 = loadAdapterConfigSync(cwd2);
 			const fresh = createAdapterState(loaded2.config, path.join(agentDir(), "auto-router"), cwd2, loaded2.errors);
+			fresh.budgets.mergeProfileLimits(collectProfileBudgets(fresh.config));
 			if (current?.ctx) {
 				fresh.ctx = current.ctx;
-				fresh.sessionId = current.sessionId;
 				refreshModels(fresh, current.ctx);
 				restoreDecisions(fresh, current.ctx);
 			}
@@ -178,6 +221,7 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 				// no UI context — swallow
 			}
 		});
+		startQuotaRefresh(stateRef, pi, ctx);
 	});
 
 	pi.on("session_branch", (event, ctx) => {
@@ -195,9 +239,42 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 		current.lastDecision = undefined;
 	});
 
+	pi.on("session_shutdown", () => {
+		const current = stateRef.current;
+		if (!current) return;
+		if (current.ctx) stopQuotaRefresh(current.ctx);
+		persistTrackers(current);
+	});
 	// Reserved for Mode B (setModel-based routing) — inert in Mode A.
 	pi.on("input", () => {});
+
+	// Test/build outcome detection: a failed test command temporarily raises
+	// the tier floor (see TEST_FAILURE_ESCALATION_MS in router.ts) — debugging
+	// benefits from a stronger model; a passing run clears the escalation.
+	pi.on("tool_result", (event) => {
+		const current = stateRef.current;
+		if (!current || typeof event !== "object" || event === null) return;
+		if (!("toolName" in event) || event.toolName !== "bash") return;
+		const input = "input" in event ? event.input : undefined;
+		const command =
+			typeof input === "object" && input !== null && "command" in input && typeof input.command === "string"
+				? input.command
+				: "";
+		if (!TEST_COMMAND_RE.test(command)) return;
+		const failed = "isError" in event && event.isError === true;
+		current.testFailureAt = failed ? Date.now() : undefined;
+		current.eventLog.append({
+			type: failed ? "error" : "decision",
+			at: Date.now(),
+			what: failed ? "test-failure" : "test-pass",
+			command: redactSecrets(command.slice(0, 200)),
+		});
+	});
 }
+
+/** Matches common test/build invocations in bash tool commands. */
+const TEST_COMMAND_RE =
+	/\b(?:bun|npm|pnpm|yarn)\s+(?:run\s+)?(?:test|build)\b|\b(?:vitest|jest|pytest|go\s+test|cargo\s+test)\b|\btsc\b/;
 
 function restoreDecisions(state: AdapterState, ctx: OmpExtensionContext): void {
 	const prior: RoutingDecision[] = [];

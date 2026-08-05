@@ -122,20 +122,34 @@ export function detectCodeSignals(prompt: string): string[] {
 
 const ASCII_WORD_RE = /^[\x20-\x7e]+$/;
 
+/** A precompiled keyword matcher: word-boundary regex for ASCII, lowercase substring otherwise. */
+type KeywordMatcher = { test: (lowerPrompt: string) => boolean };
+
+/** Precompile a keyword list once at module load instead of per request. */
+function compileKeywords(keywords: readonly string[]): readonly KeywordMatcher[] {
+	return keywords.map((keyword) => {
+		if (ASCII_WORD_RE.test(keyword)) {
+			const re = new RegExp(`\\b${keyword.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+			return { test: (lowerPrompt) => re.test(lowerPrompt) };
+		}
+		const sub = keyword.toLowerCase();
+		return { test: (lowerPrompt) => lowerPrompt.includes(sub) };
+	});
+}
+
+const CODE_MATCHERS = compileKeywords(CODE_KEYWORDS);
+const CREATIVE_MATCHERS = compileKeywords(CREATIVE_KEYWORDS);
+const ANALYSIS_MATCHERS = compileKeywords(ANALYSIS_KEYWORDS);
+
 /**
  * Count keyword hits. ASCII keywords match on word boundaries (so `fix` does
  * not fire on `prefix`); CJK keywords match as plain substrings.
  */
-function countKeywordHits(prompt: string, keywords: readonly string[]): number {
+function countKeywordHits(prompt: string, matchers: readonly KeywordMatcher[]): number {
 	const lower = prompt.toLowerCase();
 	let hits = 0;
-	for (const keyword of keywords) {
-		const hit = ASCII_WORD_RE.test(keyword)
-			? new RegExp(
-					`\\b${keyword.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
-				).test(lower)
-			: lower.includes(keyword);
-		if (hit) hits++;
+	for (const matcher of matchers) {
+		if (matcher.test(lower)) hits++;
 	}
 	return hits;
 }
@@ -149,10 +163,10 @@ function countKeywordHits(prompt: string, keywords: readonly string[]): number {
 export function classifyIntent(prompt: string, opts?: IntentOptions): IntentResult {
 	const codeScore =
 		2 * detectCodeSignals(prompt).length +
-		countKeywordHits(prompt, CODE_KEYWORDS) +
+		countKeywordHits(prompt, CODE_MATCHERS) +
 		(opts?.hasCodeContext ? 1 : 0);
-	const creativeScore = countKeywordHits(prompt, CREATIVE_KEYWORDS);
-	const analysisScore = countKeywordHits(prompt, ANALYSIS_KEYWORDS);
+	const creativeScore = countKeywordHits(prompt, CREATIVE_MATCHERS);
+	const analysisScore = countKeywordHits(prompt, ANALYSIS_MATCHERS);
 
 	const total = codeScore + creativeScore + analysisScore;
 	if (total === 0) {

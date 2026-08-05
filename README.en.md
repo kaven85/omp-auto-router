@@ -12,10 +12,20 @@ Ported from the design ideas of [pi-auto-router](https://github.com/danialranjha
 - **Complexity tiers**: every request is auto-classified as `trivial / simple / standard / complex`; tier drives model + thinking effort
 - **Explicit pinning**: `@reasoning` / `@swe` / `@long` / `@vision` / `@fast` / `@profile:<name>` (tokens are stripped automatically — the model never sees them)
 - **Same-request failover**: if the first target fails (retryable error, no substantive output), the next candidate takes over; thinking-only partials don't block the switch
-- **Budgets & quotas**: per-provider daily/monthly USD budgets (warn at 80%, block + switch chain at 100%), UVI quota pacing (critical blocks / stressed demotes / surplus promotes)
+- **Post-failure cooldown**: a failed target enters a 5-minute transient cooldown — later requests skip it instead of rediscovering the failure; a success clears it
+- **Rating feedback**: `/auto-router rate` scores feed ordering — candidates with ≥5 ratings and <40% good are demoted to the back of the chain (never removed; still the failover of last resort)
+- **Test-failure escalation**: after a test/build bash command fails, the tier floor rises one level for 10 minutes (debugging deserves a stronger model); a passing run clears it
+- **Budgets & quotas**: per-provider daily/monthly USD budgets (warn at 80%, block + switch chain at 100%; `profile.budgets` in config are defaults, CLI `budget set` overrides), UVI quota pacing (critical blocks / stressed demotes / surplus promotes)
 - **Policy rules**: force-tier / prefer / exclude-provider / force-billing / force-constraint, with hour-of-day and weekday conditions
 - **Shadow mode**: record decisions but route by configured order, for comparison and validation
-- **Explainable**: `/auto-router explain` prints the full reasoning chain; decisions/usage are persisted as JSONL
+- **Explainable**: `/auto-router explain` prints the full reasoning chain plus per-candidate ratings; decisions/usage are persisted as JSONL
+- **Restart memory**: circuit-breaker state and latency rolling means persist (`circuit.json` / `latency.json`) for warm starts
+- **Env switches**: `OMP_AUTO_ROUTER_UVI_HARD=1` (exclude stressed-UVI providers), `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>` (classifier confidence gate, default 0.45)
+- **Background quota refresh**: UVI quota snapshots refresh every 30s in the background (host-managed timer), so requests never block on an expired cache
+- **Dashboard widget**: after each decision a profile/budget/circuit/UVI overview is rendered via `setWidget` (degrades silently when the host lacks it)
+- **Provider registry**: provider-specific knowledge (Kimi window labels, DeepSeek balance endpoint) lives in `provider-registry.ts`; a target-level `balanceEndpoint` overrides the default
+- **Log rotation**: the event log truncates to its newest half past ~2 MB; daily budget buckets are kept for 62 days (monthly rollups indefinitely)
+- **Analytics script**: `bun scripts/routing-stats.ts` aggregates the event log (decisions per profile/tier/target, failovers, top errors)
 
 ---
 
@@ -450,7 +460,7 @@ Budget/rating persistence: `~/.omp/agent/auto-router/budget-usage.json`, `budget
 
 - Virtual model metadata (contextWindow etc.) is static; only affects `/model` display
 - Under multi-session (RPC), ctx is a process-level singleton; the plugin assumes a "single active session"
-- `OMP_AUTO_ROUTER_*` env switches (e.g. UVI hard mode) are not implemented yet
+- `OMP_AUTO_ROUTER_UVI_HARD` / `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD` are supported; other `OMP_AUTO_ROUTER_*` switches are not implemented yet
 - The plugin is not yet distributed via the omp marketplace / `omp install` (currently referenced as a directory)
 
 ## Development

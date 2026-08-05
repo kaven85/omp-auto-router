@@ -44,6 +44,9 @@ function isFiniteNumber(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value);
 }
 
+/** Daily usage buckets are retained for this many days; monthly rollups are kept indefinitely. */
+export const DAILY_RETENTION_DAYS = 62;
+
 /** Validate one stats entry; corrupt entries are dropped rather than trusted. */
 function isUsageStats(value: unknown): value is ProviderUsageStats {
 	if (typeof value !== "object" || value === null) {
@@ -135,6 +138,8 @@ function accumulate(
 export class BudgetTracker {
 	private usageData: BudgetUsage;
 	private limitsData: Record<string, BudgetLimit>;
+	/** Profile-configured defaults; command/file limits take precedence. */
+	private profileLimitsData: Record<string, BudgetLimit> = {};
 
 	constructor(
 		private readonly usageStore: BudgetStore,
@@ -158,6 +163,12 @@ export class BudgetTracker {
 		const nowMs = now.getTime();
 		accumulate(this.usageData.daily, dayKey(now), provider, delta, nowMs);
 		accumulate(this.usageData.monthly, monthKey(now), provider, delta, nowMs);
+		// Bound growth: daily buckets older than the retention window are dead
+		// weight (monthly rollups keep the long-term view).
+		const cutoff = dayKey(new Date(nowMs - DAILY_RETENTION_DAYS * 24 * 60 * 60 * 1000));
+		for (const key of Object.keys(this.usageData.daily)) {
+			if (key < cutoff) delete this.usageData.daily[key];
+		}
 		this.usageStore.save(this.usageData);
 	}
 
@@ -204,9 +215,29 @@ export class BudgetTracker {
 		return buckets;
 	}
 
-	/** All configured limits, keyed by provider (a copy). */
+	/** All configured limits, keyed by provider (a copy). File/command limits override profile defaults. */
 	limits(): Record<string, BudgetLimit> {
-		return { ...this.limitsData };
+		return { ...this.profileLimitsData, ...this.limitsData };
+	}
+
+	/**
+	 * Merge profile-configured default limits. These are overridden by any
+	 * limit set via `setLimit` (which persists to the limits store). Calling
+	 * this again replaces the previous profile-default layer, so config reloads
+	 * keep the effective limits in sync without clobbering user overrides.
+	 */
+	mergeProfileLimits(limits: Record<string, BudgetLimit>): void {
+		this.profileLimitsData = {};
+		for (const [provider, limit] of Object.entries(limits)) {
+			if (limit && typeof limit === "object" && isFiniteNumber(limit.amount)) {
+				this.profileLimitsData[provider] = limit;
+			}
+		}
+	}
+
+	/** Clear profile-configured default limits. */
+	clearProfileLimits(): void {
+		this.profileLimitsData = {};
 	}
 
 	/** Clear all accumulated usage (limits are kept) and persist. */

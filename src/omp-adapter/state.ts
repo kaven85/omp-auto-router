@@ -11,8 +11,34 @@ import { FeedbackTracker } from "../core/feedback-tracker";
 import { JsonStateStore } from "../core/state-store";
 import { LatencyTracker } from "../core/latency-tracker";
 import { ProfileRegistry } from "../core/profile-registry";
-import type { RouterConfig, RoutingDecision, QuotaSnapshot } from "../core/types";
+import type { HostPorts } from "../core/host-ports";
+import type { BudgetLimit, RouterConfig, RoutingDecision, QuotaSnapshot } from "../core/types";
 import type { OmpExtensionContext, OmpModel } from "./omp-api";
+
+export function collectProfileBudgets(config: RouterConfig): Record<string, BudgetLimit> {
+	const merged: Record<string, BudgetLimit> = {};
+	for (const profile of Object.values(config.profiles)) {
+		if (!profile.budgets) continue;
+		for (const [provider, limit] of Object.entries(profile.budgets)) {
+			merged[provider] = limit;
+		}
+	}
+	return merged;
+}
+
+/** Warm-start circuit breaker and latency rolling means from persisted snapshots (best effort). */
+function restoreTrackers(stateStore: JsonStateStore, circuit: CircuitBreaker, latency: LatencyTracker): void {
+	const circuitSnapshot = stateStore.readJson<Record<string, { consecutiveFailures: number; openedAt: number; cooldownMs: number }>>("circuit.json");
+	if (circuitSnapshot) circuit.restore(circuitSnapshot);
+	const latencySnapshot = stateStore.readJson<Record<string, number>>("latency.json");
+	if (latencySnapshot) latency.restore(latencySnapshot);
+}
+
+/** Persist circuit breaker + latency snapshots so restarts keep warm-start data. */
+export function persistTrackers(state: AdapterState): void {
+	state.stateStore.writeJson("circuit.json", state.circuit.snapshot());
+	state.stateStore.writeJson("latency.json", state.latency.snapshot());
+}
 
 export interface AdapterState {
 	config: RouterConfig;
@@ -26,8 +52,10 @@ export interface AdapterState {
 	stateStore: JsonStateStore;
 	/** Raw omp models by "provider/id" key, from ctx.models.list(). */
 	modelsByKey: Map<string, OmpModel>;
-	/** Session id supplied to model switching/getApiKey; re-read per session. */
-	sessionId: string | undefined;
+	/** Cached HostPorts bound to the adopted ctx; rebuilt when ctx changes. */
+	hostPorts: { ctx: OmpExtensionContext; host: HostPorts } | undefined;
+	/** True once a configured target resolved in the live registry; skips the per-request polling grace period. */
+	modelsReady: boolean;
 	/** Resolved project path for path-activation; mirrors ctx.cwd. */
 	cwd: string;
 	/** Last pipeline result (for /auto-router explain). */
@@ -52,6 +80,10 @@ export interface AdapterState {
 	shadowEnabled: boolean;
 	/** Throttled quota fetch cache: { at, data }. */
 	quotaCache: { at: number; data: QuotaSnapshot[] };
+	/** "provider/model" → epoch ms until which the target is excluded (transient cooldown after failure). */
+	cooldowns: Map<string, number>;
+	/** Epoch ms of the most recent test/build tool failure; drives temporary tier escalation. */
+	testFailureAt: number | undefined;
 	/** User ratings of routing decisions. */
 	ratings: FeedbackTracker;
 	/** Per-session settled-call stats (normal mode only; shadow pauses counting). */
@@ -84,17 +116,23 @@ export function createAdapterState(
 		load: () => stateStore.readJson<import("../core/types").RatingEntry[]>("ratings.json"),
 		save: (v: unknown) => stateStore.writeJson("ratings.json", v),
 	};
+	const budgets = new BudgetTracker(usageStore, limitsStore);
+	budgets.mergeProfileLimits(collectProfileBudgets(config));
+	const circuit = new CircuitBreaker();
+	const latency = new LatencyTracker();
+	restoreTrackers(stateStore, circuit, latency);
 	return {
 		config,
 		registry: new ProfileRegistry(config, { cwd }),
-		circuit: new CircuitBreaker(),
-		latency: new LatencyTracker(),
-		budgets: new BudgetTracker(usageStore, limitsStore),
+		circuit,
+		latency,
+		budgets,
 		decisions: new DecisionStore(),
 		eventLog: new EventLog(stateDir),
 		stateStore,
 		modelsByKey: new Map(),
-		sessionId: undefined,
+		hostPorts: undefined,
+		modelsReady: false,
 		cwd,
 		lastDecision: undefined,
 		doctorProbes: {
@@ -110,6 +148,8 @@ export function createAdapterState(
 		uviEnabled: true,
 		shadowEnabled: false,
 		quotaCache: { at: 0, data: [] },
+		cooldowns: new Map(),
+		testFailureAt: undefined,
 		ratings: new FeedbackTracker(ratingsStore),
 		sessionUseage: { calls: new Map(), cost: new Map(), thinking: new Map() },
 	};

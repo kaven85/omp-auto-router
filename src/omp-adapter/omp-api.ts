@@ -44,10 +44,11 @@ export interface OmpModel {
 	cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 }
 
-export interface OmpUiContext {
-	hasUI: boolean;
+export interface OmpUiContext {	hasUI: boolean;
 	notify(message: string, level: "info" | "warning" | "error"): void;
 	setStatus(text: string): void;
+	/** Optional dashboard widget surface (host-dependent; probed at runtime). */
+	setWidget?(id: string, lines: string[]): void;
 }
 
 export interface OmpSessionEntry {
@@ -67,6 +68,8 @@ export interface OmpExtensionContext {
 	modelRegistry: OmpModelRegistry;
 	ui: OmpUiContext;
 	sessionManager: OmpSessionManager;
+	/** Host-provided context token usage snapshot (shape is host-defined; adapter defensively coerces). */
+	getContextUsage(): unknown;
 	setInterval(fn: () => void, ms: number): unknown;
 	setTimeout(fn: () => void, ms: number): unknown;
 	clearTimer(handle: unknown): void;
@@ -131,6 +134,7 @@ export interface OmpExtensionApi {
 	registerCommand(name: string, def: OmpCommandDef): void;
 	setModel(model: OmpModel): Promise<boolean>;
 	setThinkingLevel(level: string): void;
+	getThinkingLevel?(): string;
 	appendEntry(customType: string, data?: unknown): void;
 	logger: { debug(...args: unknown[]): void; info(...args: unknown[]): void; warn(...args: unknown[]): void; error(...args: unknown[]): void };
 }

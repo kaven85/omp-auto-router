@@ -57,6 +57,9 @@ export class MockExtensionApi implements OmpExtensionApi {
 	setThinkingLevel(level: string): void {
 		this.thinkingLevels.push(level);
 	}
+	getThinkingLevel(): string {
+		return this.thinkingLevels.at(-1) ?? "medium";
+	}
 	appendEntry(customType: string, data?: unknown): void {
 		this.entries.push({ customType, data });
 	}
@@ -67,11 +70,11 @@ export class MockExtensionApi implements OmpExtensionApi {
 		error: (...args: unknown[]) => this.logs.push(["error", ...args]),
 	};
 
-	/** Fire an extension event with a synthetic ctx. */
-	async fire(event: string, ctx: OmpExtensionContext): Promise<void> {
+	/** Fire an extension event with a synthetic ctx and optional event payload. */
+	async fire(event: string, ctx: OmpExtensionContext, payload: unknown = {}): Promise<void> {
 		const handlers = this.emitter.listeners(event) as Array<(...args: unknown[]) => unknown>;
 		for (const handler of handlers) {
-			await handler({}, ctx);
+			await handler(payload, ctx);
 		}
 	}
 
@@ -110,6 +113,7 @@ export class MockExtensionApi implements OmpExtensionApi {
 						index: i,
 					})),
 			},
+			getContextUsage: () => undefined,
 			setInterval: () => 0,
 			setTimeout: () => 0,
 			clearTimer: () => {},

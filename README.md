@@ -12,10 +12,20 @@
 - **复杂度分级**：每次请求自动分类 `trivial / simple / standard / complex`，层级联动模型 + thinking 强度
 - **显式钉层**：`@reasoning` / `@swe` / `@long` / `@vision` / `@fast` / `@profile:<name>`（token 自动剥离，模型看不到）
 - **同请求 failover**：首选目标失败（可重试错误、未产出实质内容）自动换下一候选；thinking-only 部分不阻断切换
-- **预算与配额**：per-provider 日/月 USD 预算（80% 警告、100% 阻断换链）、UVI 配额配速（critical 阻断 / stressed 降级 / surplus 提升）
+- **失败后冷却**：目标失败后进入 5 分钟瞬时冷却，后续请求直接跳过而非每次重试；成功即解除
+- **评分反哺**：`/auto-router rate` 的评分参与排序——样本 ≥5 且好评率 <40% 的候选自动降到链尾（永不剔除，仍兜底）
+- **测试失败升级**：bash 里的 test/build 命令失败后 10 分钟内，tier 下限自动升一级（调试任务用更强模型）；测试通过即解除
+- **预算与配额**：per-provider 日/月 USD 预算（80% 警告、100% 阻断换链；配置文件 `profile.budgets` 为默认、命令行 set 覆盖）、UVI 配额配速（critical 阻断 / stressed 降级 / surplus 提升）
 - **策略规则**：force-tier / prefer / exclude-provider / force-billing / force-constraint，支持时间段与周几条件
 - **影子模式**：照记决策但按配置顺序路由，对比验证
-- **可解释**：`/auto-router explain` 输出完整推理链；决策/用量 JSONL 落盘
+- **可解释**：`/auto-router explain` 输出完整推理链与链上候选评分；决策/用量 JSONL 落盘
+- **跨重启记忆**：熔断器状态与延迟滚动均值持久化（`circuit.json` / `latency.json`），重启后 warm-start
+- **环境开关**：`OMP_AUTO_ROUTER_UVI_HARD=1`（stressed UVI 直接排除）、`OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>`（分类置信度阈值，默认 0.45）
+- **后台配额刷新**：session 启动后每 30s 后台刷新 UVI 配额（host managed timer），请求路径不再因缓存过期而阻塞
+- **仪表盘 widget**：决策后渲染 profile/预算/熔断/UVI 概览（host 无 setWidget 时自动降级）
+- **Provider registry**：provider 专属知识（Kimi 窗口标签、DeepSeek 余额端点）集中在 `provider-registry.ts`；target 级 `balanceEndpoint` 可覆盖默认端点
+- **日志轮转**：事件日志超过 ~2MB 自动截断保留最新一半；预算 daily 桶保留 62 天（monthly 无限期）
+- **分析脚本**：`bun scripts/routing-stats.ts` 聚合事件日志（profile/tier/target 分布、failover、top 错误）
 
 ---
 
@@ -224,7 +234,7 @@ activate:                           # 按 cwd 前缀自动激活
 | `model` | string | ✅ | 与 `/model` 显示的 id 一致 |
 | `label` | string | 否 | 展示标签 |
 | `billing` | `subscription/per-token` | 否 | 缺省 `subscription`；影响预算桶与合成 UVI |
-| `balanceEndpoint` | string | 否 | 自定义余额 API（per-token 提供商） |
+| `balanceEndpoint` | string | 否 | 自定义余额 API（per-token 提供商）；覆盖 provider registry 内置默认（deepseek），响应接受 deepseek 或 `{currency, total_balance}` 形状，余额显示在 `/auto-router useage` |
 
 凭证走 omp 的 auth 链（`agent.db` 多凭证），**无需**在配置里写密钥。
 
@@ -450,7 +460,7 @@ tail ~/.omp/agent/auto-router/auto-router.events.jsonl
 
 - 虚拟模型元数据（contextWindow 等）为静态值，仅影响 `/model` 展示
 - 多会话（RPC）下 ctx 为进程级单例，按"单活动会话"假设运行
-- `OMP_AUTO_ROUTER_*` 环境开关（如 UVI hard mode）尚未实现
+- `OMP_AUTO_ROUTER_UVI_HARD` / `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD` 环境开关已支持；其余 `OMP_AUTO_ROUTER_*` 开关尚未实现
 - 插件包尚未走 omp 市场/`omp install` 安装形态（当前为目录引用）
 
 ## 开发

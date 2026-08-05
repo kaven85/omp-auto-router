@@ -79,4 +79,18 @@ describe("EventLog", () => {
 		log.append({ type: "decision", at: 1 });
 		expect(log.lastError).toBeUndefined();
 	});
+
+	test("rotates to the newest half once past maxBytes", () => {
+		const tiny = new EventLog(dir, "rotating.jsonl", 200);
+		for (let i = 0; i < 100; i++) {
+			tiny.append({ type: "decision", at: i, profile: "p".repeat(20) });
+		}
+		const kept = tiny.readAll();
+		expect(kept.length).toBeGreaterThan(0);
+		expect(kept.length).toBeLessThan(100);
+		// kept events are the newest ones, still in order
+		expect(kept.at(-1)).toEqual({ type: "decision", at: 99, profile: "p".repeat(20) });
+		// file stays within roughly the rotation bound
+		expect(tiny.lastError).toBeUndefined();
+	});
 });

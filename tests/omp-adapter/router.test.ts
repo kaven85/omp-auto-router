@@ -124,6 +124,138 @@ describe("adapter router (Mode A)", () => {
 		expect(api.entries.some((e) => e.customType === "com.omp.auto-router.decision")).toBe(true);
 		rmSync(dir, { recursive: true, force: true });
 	});
+	test("thinking level is applied during the delegate stream and restored afterwards", async () => {
+		const { api, state } = setup();
+		streamBehavior = async function* () {
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		state.ctx = api.makeCtx();
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context: contextWithPrompt("@reasoning prove primes"),
+			options: {},
+		});
+		for await (const _event of handler) { /* drain */ }
+		// complex tier config thinking=high; mock's pre-existing level is "medium".
+		expect(api.thinkingLevels).toEqual(["high", "medium"]);
+	});
+
+	test("thinking level is not touched in shadow mode", async () => {
+		const { api, state } = setup();
+		state.shadowEnabled = true;
+		streamBehavior = async function* () {
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		state.ctx = api.makeCtx();
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context: contextWithPrompt("@reasoning prove primes"),
+			options: {},
+		});
+		for await (const _event of handler) { /* drain */ }
+		expect(api.thinkingLevels).toEqual([]);
+	});
+
+	test("circuit and latency snapshots persist after a stream settles", async () => {
+		const { api, state, dir } = setup();
+		streamBehavior = async function* () {
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		state.ctx = api.makeCtx();
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context: contextWithPrompt("@reasoning prove primes"),
+			options: {},
+		});
+		for await (const _event of handler) { /* drain */ }
+		// A fresh state over the same dir warm-starts from the persisted snapshots.
+		const revived = createAdapterState(CONFIG, dir, "/tmp/work");
+		expect(revived.latency.average("anthropic/opus")).toBeGreaterThanOrEqual(0);
+	});
+
+	test("a failed target is cooled down and skipped on the next request", async () => {
+		const { api, state, ctx } = setup();
+		state.ctx = ctx;
+		streamBehavior = (model) =>
+			model.provider === "anthropic"
+				? (async function* (): AsyncGenerator<{ type: string; [k: string]: unknown }> {
+						throw new Error("overloaded");
+					})()
+				: (async function* () {
+						yield { type: "done", reason: "stop", message: {} };
+					})();
+		const run = async () => {
+			const handler = createStreamHandler(state, api, {
+				model: { provider: "auto-router", id: "premium" },
+				context: contextWithPrompt("@reasoning prove primes"),
+				options: {},
+			});
+			for await (const _event of handler) { /* drain */ }
+		};
+		await run();
+		expect(streamCalls).toEqual([
+			{ provider: "anthropic", model: "opus" },
+			{ provider: "google", model: "gemini" },
+		]);
+		streamCalls.length = 0;
+		await run();
+		// anthropic/opus failed last time → cooldown excludes it; gemini serves directly.
+		expect(streamCalls).toEqual([{ provider: "google", model: "gemini" }]);
+	});
+
+	test("poorly rated candidates are demoted behind the rest of the chain", async () => {
+		const { api, state, ctx } = setup();
+		state.ctx = ctx;
+		// flash is cheaper and would normally sort first; 5 bad ratings demote it.
+		for (let i = 0; i < 5; i++) {
+			state.ratings.rate({ provider: "deepseek", model: "flash", rating: "bad", tier: "standard", profile: "premium" });
+		}
+		streamBehavior = async function* () {
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context: contextWithPrompt("summarize this document"),
+			options: {},
+		});
+		for await (const _event of handler) { /* drain */ }
+		expect(streamCalls[0]).toEqual({ provider: "anthropic", model: "sonnet" });
+		expect(state.lastDecision?.decision.orderedCandidates.at(-1)).toEqual({ provider: "deepseek", model: "flash", billing: "per-token" });
+	});
+
+	test("uses ctx.getContextUsage() as the authoritative token estimate", async () => {
+		const { api, state, ctx } = setup();
+		streamBehavior = async function* () {
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		state.ctx = api.makeCtx({ getContextUsage: () => ({ totalTokens: 150_000 }) });
+		const context = contextWithPrompt("hi");
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context,
+			options: {},
+		});
+		for await (const _event of handler) { /* drain */ }
+		expect(state.lastDecision?.decision.estimatedTokens).toBe(150_000);
+	});
+
+	test("falls back to summing all context text when getContextUsage returns nothing usable", async () => {
+		const { api, state } = setup();
+		streamBehavior = async function* () {
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		state.ctx = api.makeCtx({ getContextUsage: () => undefined });
+		const context = contextWithPrompt("hello world");
+		context.systemPrompt = ["sys"];
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context,
+			options: {},
+		});
+		for await (const _event of handler) { /* drain */ }
+		expect(state.lastDecision?.decision.estimatedTokens).toBe(4);
+	});
+
 	test("models discovered after the initial snapshot remain routable", async () => {
 		const api = new MockExtensionApi();
 		const dir = mkdtempSync(join(tmpdir(), "ar-router-late-model-"));

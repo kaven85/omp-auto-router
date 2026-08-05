@@ -10,6 +10,7 @@ import * as path from "node:path";
 import { readFileSync } from "node:fs";
 
 import { loadRouterConfigFile, mergeRouterConfigs, parseRouterConfig } from "../core/config-loader";
+import type { ConfigLoadResult } from "../core/config-loader";
 import type { RouterConfig } from "../core/types";
 
 export interface LoadedConfig {
@@ -64,31 +65,41 @@ export function projectConfigPath(cwd: string): string {
 	return path.join(cwd, ".omp", "auto-router.yml");
 }
 
-export async function loadAdapterConfig(cwd: string): Promise<LoadedConfig> {
+/** Shared layering: user config then project config over DEFAULT_CONFIG, collecting non-fatal errors. */
+function assemble(results: ReadonlyArray<readonly [label: string, layer: "user" | "project", result: ConfigLoadResult]>): LoadedConfig {
 	const errors: string[] = [];
 	const layers: string[] = [];
 	const parts: (RouterConfig | undefined)[] = [];
+	for (const [label, layer, result] of results) {
+		if (result.errors.length > 0) {
+			errors.push(`${label}: ${result.errors.join("; ")}`);
+		}
+		if (result.config) {
+			layers.push(layer);
+			parts.push(result.config);
+		}
+	}
+	return { config: mergeRouterConfigs(DEFAULT_CONFIG, ...parts), errors, layers };
+}
 
-	const user = await loadRouterConfigFile(userConfigPath());
-	if (user.errors.length > 0) {
-		errors.push(`~/.omp/agent/auto-router.yml: ${user.errors.join("; ")}`);
+/** Synchronous file read mirroring loadRouterConfigFile: ENOENT/ENOTDIR is not an error. */
+function readConfigFileSync(file: string): ConfigLoadResult {
+	let text: string;
+	try {
+		text = readFileSync(file, "utf8");
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ENOENT" || code === "ENOTDIR") return { errors: [] };
+		return { errors: [String(error)] };
 	}
-	if (user.config) {
-		layers.push("user");
-		parts.push(user.config);
-	}
+	return parseRouterConfig(text);
+}
 
-	const project = await loadRouterConfigFile(projectConfigPath(cwd));
-	if (project.errors.length > 0) {
-		errors.push(`.omp/auto-router.yml: ${project.errors.join("; ")}`);
-	}
-	if (project.config) {
-		layers.push("project");
-		parts.push(project.config);
-	}
-
-	const config = mergeRouterConfigs(DEFAULT_CONFIG, ...parts);
-	return { config, errors, layers };
+export async function loadAdapterConfig(cwd: string): Promise<LoadedConfig> {
+	return assemble([
+		["~/.omp/agent/auto-router.yml", "user", await loadRouterConfigFile(userConfigPath())],
+		[".omp/auto-router.yml", "project", await loadRouterConfigFile(projectConfigPath(cwd))],
+	]);
 }
 
 /**
@@ -97,32 +108,8 @@ export async function loadAdapterConfig(cwd: string): Promise<LoadedConfig> {
  * Same layering as {@link loadAdapterConfig}.
  */
 export function loadAdapterConfigSync(cwd: string): LoadedConfig {
-	const errors: string[] = [];
-	const layers: string[] = [];
-	const parts: (RouterConfig | undefined)[] = [];
-
-	for (const [label, file] of [
-		["~/.omp/agent/auto-router.yml", userConfigPath()],
-		[".omp/auto-router.yml", projectConfigPath(cwd)],
-	] as const) {
-		try {
-			const text = readFileSync(file, "utf8");
-			const parsed = parseRouterConfig(text);
-			if (parsed.errors.length > 0) {
-				errors.push(`${label}: ${parsed.errors.join("; ")}`);
-			}
-			if (parsed.config) {
-				layers.push(label.startsWith("~") ? "user" : "project");
-				parts.push(parsed.config);
-			}
-		} catch (error) {
-			const code = (error as NodeJS.ErrnoException).code;
-			if (code !== "ENOENT" && code !== "ENOTDIR") {
-				errors.push(`${label}: ${String(error)}`);
-			}
-		}
-	}
-
-	const config = mergeRouterConfigs(DEFAULT_CONFIG, ...parts);
-	return { config, errors, layers };
+	return assemble([
+		["~/.omp/agent/auto-router.yml", "user", readConfigFileSync(userConfigPath())],
+		[".omp/auto-router.yml", "project", readConfigFileSync(projectConfigPath(cwd))],
+	]);
 }

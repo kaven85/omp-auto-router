@@ -16,12 +16,76 @@ import { streamSimple } from "@oh-my-pi/pi-ai";
 import { isProviderRetryableError } from "@oh-my-pi/pi-ai/error";
 
 import { failoverStream, defaultIsRetryable, defaultIsSubstantive } from "../core/failover-engine";
+import type { FeedbackTracker } from "../core/feedback-tracker";
 import { route } from "../core/pipeline";
-import type { QuotaSnapshot } from "../core/types";
+import type { QuotaSnapshot, RoutingDecision } from "../core/types";
 import type { AdapterState } from "./state";
-import { enrichCandidates, createHostPorts } from "./host-ports";
+import { persistTrackers } from "./state";
+import { enrichCandidates, createHostPorts, QUOTA_REFRESH_MS } from "./host-ports";
 import type { OmpExtensionApi, OmpExtensionContext } from "./omp-api";
 import { redactSecrets } from "./redact";
+
+/** Transient exclusion window after a target fails within a failover chain. */
+const COOLDOWN_AFTER_FAILURE_MS = 5 * 60_000;
+
+/**
+ * Rating feedback loop (demote-only): candidates with enough ratings and a
+ * low good fraction move behind the rest. Demotion is stable and never
+ * removes a candidate — a badly rated target still serves as failover.
+ */
+function demotePoorlyRated<T extends { provider: string; model: string }>(
+	order: readonly T[],
+	ratings: FeedbackTracker,
+): T[] {
+	const poorly = (t: T): boolean => {
+		const stats = ratings.statsFor(t.provider, t.model);
+		return stats.total >= RATING_MIN_SAMPLES && stats.goodFraction < RATING_DEMOTE_BELOW;
+	};
+	const front = order.filter((t) => !poorly(t));
+	const back = order.filter(poorly);
+	return back.length === 0 ? [...order] : [...front, ...back];
+}
+
+/** Minimum ratings before a candidate's good fraction is trusted. */
+const RATING_MIN_SAMPLES = 5;
+/** Good fraction below which a candidate is demoted. */
+const RATING_DEMOTE_BELOW = 0.4;
+
+/** How long a failed test/build command keeps the tier floor raised. */
+const TEST_FAILURE_ESCALATION_MS = 10 * 60_000;
+
+const TIER_LADDER = ["trivial", "simple", "standard", "complex"] as const;
+
+/**
+ * Compose the dashboard widget: decision line plus live budget/circuit/UVI
+ * snapshots. Rendered via the optional setWidget surface (no-op when the
+ * host lacks it).
+ */
+function buildWidgetLines(state: AdapterState, decision: RoutingDecision): string[] {
+	const lines: string[] = [
+		`${decision.profile} | tier=${decision.tier} | ${decision.target.provider}/${decision.target.model}${decision.thinking !== undefined ? ` | ${decision.thinking}` : ""}`,
+	];
+	const budgetBits: string[] = [];
+	for (const [provider, limit] of Object.entries(state.budgets.limits())) {
+		const bucket = limit.monthly ? state.budgets.usage(provider).monthly : state.budgets.usage(provider).daily;
+		const used = bucket?.cost ?? 0;
+		const pct = limit.amount > 0 ? Math.round((used / limit.amount) * 100) : 0;
+		budgetBits.push(`${provider} $${used.toFixed(2)}/$${limit.amount}${limit.monthly ? "/mo" : "/day"} (${pct}%)`);
+	}
+	if (budgetBits.length > 0) lines.push(`budgets: ${budgetBits.join(" · ")}`);
+	const openCircuits = Object.entries(state.circuit.snapshot())
+		.filter(([, rec]) => Date.now() - rec.openedAt < rec.cooldownMs)
+		.map(([key, rec]) => `${key} (${rec.consecutiveFailures}x)`);
+	if (openCircuits.length > 0) lines.push(`circuit open: ${openCircuits.join(" · ")}`);
+	if (state.uviEnabled && state.quotaCache.data.length > 0) {
+		const uviBits = state.quotaCache.data.map((snapshot) => {
+			const worst = Math.max(0, ...snapshot.windows.map((window) => window.usedFraction));
+			return `${snapshot.provider} ${(100 - worst * 100).toFixed(0)}% left`;
+		});
+		lines.push(`uvi: ${uviBits.join(" · ")}`);
+	}
+	return lines;
+}
 
 export interface StreamArgs {
 	model: { provider: string; id: string };
@@ -76,9 +140,11 @@ function buildFactory(
 	pi: OmpExtensionApi,
 	context: StreamArgs["context"],
 	options: StreamArgs["options"],
+	onTargetStart?: (target: { provider: string; model: string }) => void,
 ) {
 	const host = createHostPorts(pi, state.ctx!, state);
 	return async function* factory(target: { provider: string; model: string }) {
+		onTargetStart?.(target);
 		const model = state.ctx?.models.resolve(`${target.provider}/${target.model}`);
 		if (!model) {
 			throw new Error(`auto-router: target not resolvable: ${target.provider}/${target.model}`);
@@ -111,6 +177,62 @@ async function waitForConfiguredModel(
 	}
 }
 
+/** Read optional tuning flags from the environment; all are documented in README.md. */
+function readEnvFlag(name: string): boolean {
+	return process.env[name] === "1" || process.env[name] === "true";
+}
+
+function readEnvNumber(name: string, fallback: number): number {
+	const raw = process.env[name];
+	if (raw === undefined) return fallback;
+	const parsed = Number(raw);
+	return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function createPipelineFlags(): { uviHardMode: boolean; confidenceThreshold: number } {
+	return {
+		uviHardMode: readEnvFlag("OMP_AUTO_ROUTER_UVI_HARD"),
+		confidenceThreshold: readEnvNumber("OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD", 0.45),
+	};
+}
+
+/** Extract a usable token estimate from the host, or undefined if not available. */
+function resolveEstimatedTokens(ctx: OmpExtensionContext, context: StreamArgs["context"]): number | undefined {
+	try {
+		const usage = ctx.getContextUsage();
+		if (typeof usage === "number" && Number.isFinite(usage) && usage > 0) {
+			return Math.ceil(usage);
+		}
+		if (typeof usage === "object" && usage !== null) {
+			const u = usage as Record<string, unknown>;
+			const tokenValue = u.totalTokens ?? u.tokens ?? u.contextTokens ?? u.inputTokens;
+			if (typeof tokenValue === "number" && Number.isFinite(tokenValue) && tokenValue > 0) {
+				return Math.ceil(tokenValue);
+			}
+		}
+	} catch {
+		// Host may not implement getContextUsage; fall through to heuristic.
+	}
+	// Fallback: sum all textual content (messages + system prompts).
+	let chars = 0;
+	for (const msg of context.messages) {
+		if (typeof msg.content === "string") {
+			chars += msg.content.length;
+		} else if (Array.isArray(msg.content)) {
+			for (const part of msg.content) {
+				if (typeof part === "object" && part !== null && "text" in part && typeof part.text === "string") {
+					chars += part.text.length;
+				}
+			}
+		}
+	}
+	for (const text of context.systemPrompt ?? []) {
+		chars += text.length;
+	}
+	const estimated = Math.ceil(chars / 4);
+	return estimated > 0 ? estimated : undefined;
+}
+
 export function createStreamHandler(
 	state: AdapterState,
 	pi: OmpExtensionApi,
@@ -124,22 +246,37 @@ export function createStreamHandler(
 		}
 		const profileName = args.model.id.replace(/^auto-router\//, "");
 		const { text: rawPrompt, hasImages } = lastUserText(args.context);
-		const priorTier = state.decisions.last()?.tier as "trivial" | "simple" | "standard" | "complex" | undefined;
+		let priorTier = state.decisions.last()?.tier as "trivial" | "simple" | "standard" | "complex" | undefined;
+		// Test/build failure escalation: for a short window after a failing test
+		// command the tier floor rises one level — the next prompt is very likely
+		// a debugging task that warrants a stronger model.
+		if (
+			state.testFailureAt !== undefined &&
+			Date.now() - state.testFailureAt < TEST_FAILURE_ESCALATION_MS &&
+			priorTier !== "complex"
+		) {
+			const floor = priorTier ?? "simple";
+			priorTier = TIER_LADDER[Math.min(TIER_LADDER.indexOf(floor) + 1, TIER_LADDER.length - 1)];
+		}
 
-		const host = createHostPorts(pi, ctx, state);
+		const host =
+			state.hostPorts?.ctx === ctx
+				? state.hostPorts.host
+				: (state.hostPorts = { ctx, host: createHostPorts(pi, ctx, state) }).host;
 		const profile = state.registry.profile(profileName);
 		if (!profile) {
 			yield* failWith(`auto-router: unknown profile "${profileName}"`);
 			return;
 		}
 		const allTargets = Object.values(profile.tiers).flatMap((t) => t.targets);
+		const estimatedTokens = resolveEstimatedTokens(ctx, args.context);
 
 		// Quota snapshots feed UVI; throttled to once per 30s.
 		let quota: Record<string, QuotaSnapshot> = {};
 		if (state.uviEnabled && state.ctx) {
 			const providers = [...new Set(allTargets.map((t) => t.provider))];
 			const nowMs = Date.now();
-			if (nowMs - state.quotaCache.at >= 30_000) {
+			if (nowMs - state.quotaCache.at >= QUOTA_REFRESH_MS) {
 				const snapshots = await host.fetchQuota(providers);
 				state.quotaCache = { at: nowMs, data: snapshots };
 			}
@@ -148,13 +285,18 @@ export function createStreamHandler(
 			}
 		}
 		// Custom providers are discovered asynchronously during host startup.
-		// Give the live registry a bounded grace period before excluding them.
-		await waitForConfiguredModel(ctx, allTargets, args.options?.signal);
+		// Give the live registry a bounded grace period once per session; after
+		// the first successful resolve we stop polling (modelsReady).
+		if (!state.modelsReady) {
+			await waitForConfiguredModel(ctx, allTargets, args.options?.signal);
+			state.modelsReady = true;
+		}
 		// Candidates = active profile's tier targets enriched from the live host registry.
 		// The pipeline resolves the tier internally; we feed it the full profile target set.
-		const candidates = enrichCandidates(host, allTargets);
+		const candidates = enrichCandidates(host, allTargets, state.cooldowns);
 
 		const now = new Date();
+		const flags = createPipelineFlags();
 		const { decision, cleanPrompt } = route(
 			{
 				rawPrompt,
@@ -164,6 +306,7 @@ export function createStreamHandler(
 				...(priorTier !== undefined ? { priorTier } : {}),
 				candidates,
 				quota,
+				...(estimatedTokens !== undefined ? { estimatedTokens } : {}),
 				now,
 			},
 			{
@@ -171,6 +314,8 @@ export function createStreamHandler(
 				circuit: state.circuit,
 				latency: state.latency,
 				budgets: state.budgets,
+				uviHardMode: flags.uviHardMode,
+				confidenceThreshold: flags.confidenceThreshold,
 			},
 		);
 
@@ -183,6 +328,12 @@ export function createStreamHandler(
 				tierCfg?.targets.filter((t) => host.isHealthy(t)) ?? [];
 			decision.orderedCandidates = finalOrder;
 			decision.target = finalOrder[0] ?? decision.target;
+		} else {
+			// Rating feedback loop: candidates the user keeps rating badly are
+			// demoted to the back of the chain (stable — relative order kept).
+			finalOrder = demotePoorlyRated(finalOrder, state.ratings);
+			decision.orderedCandidates = finalOrder;
+			decision.target = finalOrder[0] ?? decision.target;
 		}
 
 		// Record + persist the decision for /auto-router explain.
@@ -193,12 +344,14 @@ export function createStreamHandler(
 		host.setStatus(
 			`auto-router ${decision.profile} | tier=${decision.tier} (${decision.confidence.toFixed(2)}) | ${decision.target.provider}/${decision.target.model}${decision.thinking !== undefined ? ` | thinking=${decision.thinking}` : ""}`,
 		);
+		host.setWidget(buildWidgetLines(state, decision));
 
 		// Strip the router tokens before the model ever sees the prompt.
 		rewriteLastUserText(args.context, cleanPrompt);
 
 		// Failover across the ordered chain; thinking-only partials stay failover-eligible.
 		const started = Date.now();
+		const targetStarts = new Map<string, number>();
 		let settledTarget: { provider: string; model: string } | undefined;
 		const hooks = {
 			// Fail over on transient provider errors (omp classifier) OR on
@@ -208,7 +361,12 @@ export function createStreamHandler(
 				isProviderRetryableError(error) || defaultIsRetryable(error),
 			isSubstantive: defaultIsSubstantive,
 			onTargetFailed: (target: { provider: string; model: string }, error: unknown) => {
-				state.circuit.recordFailure(`${target.provider}/${target.model}`, Date.now());
+				const key = `${target.provider}/${target.model}`;
+				state.circuit.recordFailure(key, Date.now());
+				// Transient cooldown: the solver excludes the target for a few
+				// minutes so subsequent requests skip it instead of rediscovering
+				// the failure on every prompt.
+				state.cooldowns.set(key, Date.now() + COOLDOWN_AFTER_FAILURE_MS);
 				state.eventLog.append({
 					type: "error",
 					at: Date.now(),
@@ -228,8 +386,14 @@ export function createStreamHandler(
 			},
 			onTargetSettled: (target: { provider: string; model: string }) => {
 				settledTarget = target;
-				state.circuit.recordSuccess(`${target.provider}/${target.model}`);
-				state.latency.record(`${target.provider}/${target.model}`, Date.now() - started);
+				const key = `${target.provider}/${target.model}`;
+				state.circuit.recordSuccess(key);
+				state.cooldowns.delete(key);
+				// Latency is measured from THIS target's stream start, not the
+				// failover chain's — otherwise a slow dead first candidate would
+				// poison the rolling mean of the fallback that actually answered.
+				const targetStart = targetStarts.get(key) ?? started;
+				state.latency.record(key, Date.now() - targetStart);
 				if (!state.shadowEnabled) {
 					const key = `${target.provider}/${target.model}`;
 					state.sessionUseage.calls.set(key, (state.sessionUseage.calls.get(key) ?? 0) + 1);
@@ -245,12 +409,50 @@ export function createStreamHandler(
 			},
 		};
 
-		const factory = buildFactory(state, pi, args.context, args.options);
-		for await (const event of failoverStream(finalOrder, factory, hooks, { signal: args.options?.signal })) {
-			if (event.type === "done" && settledTarget && typeof event.message === "object" && event.message !== null) {
-				recordUsage(state, settledTarget, (event.message as { usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }).usage);
+		const factory = buildFactory(state, pi, args.context, args.options, (target) => {
+			targetStarts.set(`${target.provider}/${target.model}`, Date.now());
+		});
+
+		// Apply the tier's thinking level to the real request: set before the
+		// delegate stream starts, restore the session's previous level when the
+		// stream ends (including abort/early-return of the generator). Skipped
+		// in shadow mode, which must not mutate session behavior.
+		const canSteerThinking =
+			decision.thinking !== undefined &&
+			!state.shadowEnabled &&
+			typeof pi.setThinkingLevel === "function";
+		const priorThinking =
+			canSteerThinking && typeof pi.getThinkingLevel === "function" ? pi.getThinkingLevel() : undefined;
+		if (canSteerThinking && decision.thinking !== undefined) {
+			try {
+				pi.setThinkingLevel(decision.thinking);
+			} catch (error) {
+				state.eventLog.append({
+					type: "error",
+					at: Date.now(),
+					what: "setThinkingLevel",
+					error: redactSecrets(String(error)),
+				});
 			}
-			yield event;
+		}
+
+		try {
+			for await (const event of failoverStream(finalOrder, factory, hooks, { signal: args.options?.signal })) {
+				if (event.type === "done" && settledTarget && typeof event.message === "object" && event.message !== null) {
+					recordUsage(state, settledTarget, (event.message as { usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }).usage);
+				}
+				yield event;
+			}
+		} finally {
+			if (canSteerThinking && priorThinking !== undefined) {
+				try {
+					pi.setThinkingLevel(priorThinking);
+				} catch {
+					// restore best-effort; the next request re-steers anyway
+				}
+			}
+			// Warm-start persistence: keep circuit/latency snapshots across restarts.
+			persistTrackers(state);
 		}
 	})();
 }

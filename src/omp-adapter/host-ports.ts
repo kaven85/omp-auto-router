@@ -9,6 +9,9 @@
 import type { HostModel, HostPorts } from "../core/host-ports";
 import type { CandidateInfo, QuotaSnapshot, RouteTarget, ThinkingLevel } from "../core/types";
 import type { AdapterState } from "./state";
+
+/** How long a quota snapshot stays fresh before a background/request refresh re-fetches it. */
+export const QUOTA_REFRESH_MS = 30_000;
 import type { OmpExtensionApi, OmpExtensionContext, OmpModel } from "./omp-api";
 import { redactSecrets } from "./redact";
 
@@ -30,7 +33,7 @@ export function createHostPorts(
 		async getApiKey(target: RouteTarget): Promise<string | undefined> {
 			const model = ctx.models.resolve(`${target.provider}/${target.model}`);
 			if (!model) return undefined;
-			return ctx.modelRegistry.getApiKey(model, state.sessionId);
+			return ctx.modelRegistry.getApiKey(model);
 		},
 
 		isHealthy(target: RouteTarget): boolean {
@@ -95,19 +98,6 @@ export function createHostPorts(
 			}
 		},
 
-		appendState(data: unknown): void {
-			pi.appendEntry("com.omp.auto-router.state", data);
-		},
-
-		readState(): unknown {
-			for (const entry of ctx.sessionManager.getBranch()) {
-				if (entry.type === "custom" && entry.customType === "com.omp.auto-router.state") {
-					return entry.data;
-				}
-			}
-			return undefined;
-		},
-
 		notify(message: string, level: "info" | "warning" | "error"): void {
 			try {
 				ctx.ui.notify(message, level);
@@ -121,6 +111,14 @@ export function createHostPorts(
 				ctx.ui.setStatus(text);
 			} catch {
 				// no-op in headless contexts
+			}
+		},
+
+		setWidget(lines: string[]): void {
+			try {
+				if (typeof ctx.ui.setWidget === "function") ctx.ui.setWidget("auto-router", lines);
+			} catch {
+				// no-op when the host lacks the widget surface
 			}
 		},
 
@@ -157,19 +155,23 @@ function wrapModel(model: OmpModel): HostModel {
 export function enrichCandidates(
 	host: HostPorts,
 	targets: RouteTarget[],
+	cooldowns?: ReadonlyMap<string, number>,
 ): CandidateInfo[] {
 	const seen = new Set<string>();
 	const out: CandidateInfo[] = [];
+	const nowMs = Date.now();
 	for (const target of targets) {
 		const key = `${target.provider}/${target.model}`;
 		if (seen.has(key)) continue;
 		seen.add(key);
 		const model = host.resolveModel(key);
+		const cooldownUntil = cooldowns?.get(key);
 		out.push({
 			target,
 			key,
 			...(model ? { capabilities: model.capabilities } : {}),
 			healthy: host.isHealthy(target),
+			...(cooldownUntil !== undefined && cooldownUntil > nowMs ? { cooldownUntil } : {}),
 		});
 	}
 	return out;
