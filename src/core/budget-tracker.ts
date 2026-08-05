@@ -135,6 +135,8 @@ function accumulate(
 export class BudgetTracker {
 	private usageData: BudgetUsage;
 	private limitsData: Record<string, BudgetLimit>;
+	/** Profile-configured defaults; command/file limits take precedence. */
+	private profileLimitsData: Record<string, BudgetLimit> = {};
 
 	constructor(
 		private readonly usageStore: BudgetStore,
@@ -204,9 +206,29 @@ export class BudgetTracker {
 		return buckets;
 	}
 
-	/** All configured limits, keyed by provider (a copy). */
+	/** All configured limits, keyed by provider (a copy). File/command limits override profile defaults. */
 	limits(): Record<string, BudgetLimit> {
-		return { ...this.limitsData };
+		return { ...this.profileLimitsData, ...this.limitsData };
+	}
+
+	/**
+	 * Merge profile-configured default limits. These are overridden by any
+	 * limit set via `setLimit` (which persists to the limits store). Calling
+	 * this again replaces the previous profile-default layer, so config reloads
+	 * keep the effective limits in sync without clobbering user overrides.
+	 */
+	mergeProfileLimits(limits: Record<string, BudgetLimit>): void {
+		this.profileLimitsData = {};
+		for (const [provider, limit] of Object.entries(limits)) {
+			if (limit && typeof limit === "object" && isFiniteNumber(limit.amount)) {
+				this.profileLimitsData[provider] = limit;
+			}
+		}
+	}
+
+	/** Clear profile-configured default limits. */
+	clearProfileLimits(): void {
+		this.profileLimitsData = {};
 	}
 
 	/** Clear all accumulated usage (limits are kept) and persist. */

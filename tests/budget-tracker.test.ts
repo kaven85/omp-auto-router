@@ -83,6 +83,31 @@ describe("record + usage", () => {
 });
 
 describe("limits", () => {
+	test("mergeProfileLimits exposes defaults and command limits override them", () => {
+		const { tracker } = makeTracker();
+		tracker.mergeProfileLimits({ anthropic: { amount: 10, monthly: true } });
+		expect(tracker.limits().anthropic).toEqual({ amount: 10, monthly: true });
+
+		tracker.setLimit("anthropic", { amount: 20 }); // command override
+		expect(tracker.limits().anthropic).toEqual({ amount: 20 }); // monthly dropped intentionally
+	});
+
+	test("re-merging profile defaults does not clobber persisted command overrides", () => {
+		const { tracker } = makeTracker();
+		tracker.mergeProfileLimits({ anthropic: { amount: 10, monthly: true }, google: { amount: 5 } });
+		tracker.setLimit("anthropic", { amount: 30 });
+		tracker.mergeProfileLimits({ anthropic: { amount: 10, monthly: true }, google: { amount: 5 } });
+		expect(tracker.limits().anthropic).toEqual({ amount: 30 });
+		expect(tracker.limits().google).toEqual({ amount: 5 });
+	});
+
+	test("invalid profile limits are ignored", () => {
+		const { tracker } = makeTracker();
+		tracker.mergeProfileLimits({ anthropic: { amount: Number.NaN }, google: { amount: 5 } });
+		expect(tracker.limits().anthropic).toBeUndefined();
+		expect(tracker.limits().google).toEqual({ amount: 5 });
+	});
+
 	test("setLimit stores and limits() returns a copy keyed by provider", () => {
 		const { tracker, limitsStore } = makeTracker();
 		tracker.setLimit("anthropic", { amount: 10 });

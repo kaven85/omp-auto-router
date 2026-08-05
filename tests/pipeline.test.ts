@@ -184,6 +184,40 @@ describe("pipeline", () => {
 		expect(result.decision.reasoning.join("\n")).toContain("defaultTier");
 	});
 
+	test("estimatedTokens from adapter overrides prompt-length heuristic", () => {
+		const deps = makeDeps();
+		const result = route(
+			{
+				rawPrompt: "short",
+				hasImages: false,
+				conversationDepth: 0,
+				candidates: targetCandidates(allTargets(CONFIG)),
+				quota: {},
+				estimatedTokens: 150_000, // force epic context despite short prompt
+				now: NOW,
+			},
+			deps,
+		);
+		expect(result.decision.estimatedTokens).toBe(150_000);
+	});
+
+	test("estimatedTokens falls back to prompt length when omitted", () => {
+		const deps = makeDeps();
+		const result = route(
+			{
+				rawPrompt: "short",
+				hasImages: false,
+				conversationDepth: 0,
+				candidates: targetCandidates(allTargets(CONFIG)),
+				quota: {},
+				now: NOW,
+			},
+			deps,
+		);
+		expect(result.decision.estimatedTokens).toBeGreaterThan(0);
+		expect(result.decision.estimatedTokens).toBeLessThan(10);
+	});
+
 	test("@long excludes small-context candidates", () => {
 		const deps = makeDeps({
 			globalRules: [{ type: "force-constraint", constraint: { minContextWindow: 100_000 } }],

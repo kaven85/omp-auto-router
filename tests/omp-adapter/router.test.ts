@@ -124,6 +124,39 @@ describe("adapter router (Mode A)", () => {
 		expect(api.entries.some((e) => e.customType === "com.omp.auto-router.decision")).toBe(true);
 		rmSync(dir, { recursive: true, force: true });
 	});
+	test("uses ctx.getContextUsage() as the authoritative token estimate", async () => {
+		const { api, state, ctx } = setup();
+		streamBehavior = async function* () {
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		state.ctx = api.makeCtx({ getContextUsage: () => ({ totalTokens: 150_000 }) });
+		const context = contextWithPrompt("hi");
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context,
+			options: {},
+		});
+		for await (const _event of handler) { /* drain */ }
+		expect(state.lastDecision?.decision.estimatedTokens).toBe(150_000);
+	});
+
+	test("falls back to summing all context text when getContextUsage returns nothing usable", async () => {
+		const { api, state } = setup();
+		streamBehavior = async function* () {
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		state.ctx = api.makeCtx({ getContextUsage: () => undefined });
+		const context = contextWithPrompt("hello world");
+		context.systemPrompt = ["sys"];
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context,
+			options: {},
+		});
+		for await (const _event of handler) { /* drain */ }
+		expect(state.lastDecision?.decision.estimatedTokens).toBe(4);
+	});
+
 	test("models discovered after the initial snapshot remain routable", async () => {
 		const api = new MockExtensionApi();
 		const dir = mkdtempSync(join(tmpdir(), "ar-router-late-model-"));

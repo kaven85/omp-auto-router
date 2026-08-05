@@ -110,6 +110,7 @@ export class MockExtensionApi implements OmpExtensionApi {
 						index: i,
 					})),
 			},
+			getContextUsage: () => undefined,
 			setInterval: () => 0,
 			setTimeout: () => 0,
 			clearTimer: () => {},

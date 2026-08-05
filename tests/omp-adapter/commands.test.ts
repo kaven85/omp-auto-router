@@ -168,7 +168,7 @@ describe("adapter commands", () => {
 	test("budget set/show/clear round-trips limits", async () => {
 		const { invoke, notifies, state } = setup();
 		await invoke("budget show");
-		expect(notifies.join("\n")).toContain("no budgets configured");
+		expect(notifies.join("\n")).toContain("anthropic: $0.00 / $10 (0%) monthly");
 
 		notifies.length = 0;
 		await invoke("budget set google 20 monthly");

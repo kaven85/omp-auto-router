@@ -48,6 +48,8 @@ export interface PipelineInput {
 	candidates: CandidateInfo[];
 	/** provider → quota snapshot (adapter: AuthStorage.fetchUsageReports). */
 	quota: Record<string, QuotaSnapshot>;
+	/** Optional authoritative token estimate from the host. Falls back to chars/4 of the prompt. */
+	estimatedTokens?: number;
 	now: Date;
 }
 
@@ -95,7 +97,10 @@ export function route(input: PipelineInput, deps: PipelineDeps): PipelineResult 
 	if (shortcut.profileOverride) reasoning.push(`profile override @profile:${shortcut.profileOverride}`);
 
 	// 2. Context + intent + complexity
-	const estimatedTokens = Math.max(1, Math.ceil(shortcut.cleanPrompt.length / 4));
+	const estimatedTokens =
+		input.estimatedTokens && Number.isFinite(input.estimatedTokens) && input.estimatedTokens > 0
+			? Math.ceil(input.estimatedTokens)
+			: Math.max(1, Math.ceil(shortcut.cleanPrompt.length / 4));
 	const intent = classifyIntent(shortcut.cleanPrompt);
 	const complexity = classifyComplexity({
 		prompt: shortcut.cleanPrompt,

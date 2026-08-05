@@ -450,7 +450,7 @@ tail ~/.omp/agent/auto-router/auto-router.events.jsonl
 
 - 虚拟模型元数据（contextWindow 等）为静态值，仅影响 `/model` 展示
 - 多会话（RPC）下 ctx 为进程级单例，按"单活动会话"假设运行
-- `OMP_AUTO_ROUTER_*` 环境开关（如 UVI hard mode）尚未实现
+- `OMP_AUTO_ROUTER_UVI_HARD` / `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD` 环境开关已支持；其余 `OMP_AUTO_ROUTER_*` 开关尚未实现
 - 插件包尚未走 omp 市场/`omp install` 安装形态（当前为目录引用）
 
 ## 开发

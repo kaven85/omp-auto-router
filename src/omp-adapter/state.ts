@@ -11,8 +11,19 @@ import { FeedbackTracker } from "../core/feedback-tracker";
 import { JsonStateStore } from "../core/state-store";
 import { LatencyTracker } from "../core/latency-tracker";
 import { ProfileRegistry } from "../core/profile-registry";
-import type { RouterConfig, RoutingDecision, QuotaSnapshot } from "../core/types";
+import type { BudgetLimit, RouterConfig, RoutingDecision, QuotaSnapshot } from "../core/types";
 import type { OmpExtensionContext, OmpModel } from "./omp-api";
+
+export function collectProfileBudgets(config: RouterConfig): Record<string, BudgetLimit> {
+	const merged: Record<string, BudgetLimit> = {};
+	for (const profile of Object.values(config.profiles)) {
+		if (!profile.budgets) continue;
+		for (const [provider, limit] of Object.entries(profile.budgets)) {
+			merged[provider] = limit;
+		}
+	}
+	return merged;
+}
 
 export interface AdapterState {
 	config: RouterConfig;
@@ -84,12 +95,14 @@ export function createAdapterState(
 		load: () => stateStore.readJson<import("../core/types").RatingEntry[]>("ratings.json"),
 		save: (v: unknown) => stateStore.writeJson("ratings.json", v),
 	};
+	const budgets = new BudgetTracker(usageStore, limitsStore);
+	budgets.mergeProfileLimits(collectProfileBudgets(config));
 	return {
 		config,
 		registry: new ProfileRegistry(config, { cwd }),
 		circuit: new CircuitBreaker(),
 		latency: new LatencyTracker(),
-		budgets: new BudgetTracker(usageStore, limitsStore),
+		budgets,
 		decisions: new DecisionStore(),
 		eventLog: new EventLog(stateDir),
 		stateStore,

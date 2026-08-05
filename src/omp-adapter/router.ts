@@ -111,6 +111,62 @@ async function waitForConfiguredModel(
 	}
 }
 
+/** Read optional tuning flags from the environment; all are documented in README.md. */
+function readEnvFlag(name: string): boolean {
+	return process.env[name] === "1" || process.env[name] === "true";
+}
+
+function readEnvNumber(name: string, fallback: number): number {
+	const raw = process.env[name];
+	if (raw === undefined) return fallback;
+	const parsed = Number(raw);
+	return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function createPipelineFlags(): { uviHardMode: boolean; confidenceThreshold: number } {
+	return {
+		uviHardMode: readEnvFlag("OMP_AUTO_ROUTER_UVI_HARD"),
+		confidenceThreshold: readEnvNumber("OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD", 0.45),
+	};
+}
+
+/** Extract a usable token estimate from the host, or undefined if not available. */
+function resolveEstimatedTokens(ctx: OmpExtensionContext, context: StreamArgs["context"]): number | undefined {
+	try {
+		const usage = ctx.getContextUsage();
+		if (typeof usage === "number" && Number.isFinite(usage) && usage > 0) {
+			return Math.ceil(usage);
+		}
+		if (typeof usage === "object" && usage !== null) {
+			const u = usage as Record<string, unknown>;
+			const tokenValue = u.totalTokens ?? u.tokens ?? u.contextTokens ?? u.inputTokens;
+			if (typeof tokenValue === "number" && Number.isFinite(tokenValue) && tokenValue > 0) {
+				return Math.ceil(tokenValue);
+			}
+		}
+	} catch {
+		// Host may not implement getContextUsage; fall through to heuristic.
+	}
+	// Fallback: sum all textual content (messages + system prompts).
+	let chars = 0;
+	for (const msg of context.messages) {
+		if (typeof msg.content === "string") {
+			chars += msg.content.length;
+		} else if (Array.isArray(msg.content)) {
+			for (const part of msg.content) {
+				if (typeof part === "object" && part !== null && "text" in part && typeof part.text === "string") {
+					chars += part.text.length;
+				}
+			}
+		}
+	}
+	for (const text of context.systemPrompt ?? []) {
+		chars += text.length;
+	}
+	const estimated = Math.ceil(chars / 4);
+	return estimated > 0 ? estimated : undefined;
+}
+
 export function createStreamHandler(
 	state: AdapterState,
 	pi: OmpExtensionApi,
@@ -133,6 +189,7 @@ export function createStreamHandler(
 			return;
 		}
 		const allTargets = Object.values(profile.tiers).flatMap((t) => t.targets);
+		const estimatedTokens = resolveEstimatedTokens(ctx, args.context);
 
 		// Quota snapshots feed UVI; throttled to once per 30s.
 		let quota: Record<string, QuotaSnapshot> = {};
@@ -155,6 +212,7 @@ export function createStreamHandler(
 		const candidates = enrichCandidates(host, allTargets);
 
 		const now = new Date();
+		const flags = createPipelineFlags();
 		const { decision, cleanPrompt } = route(
 			{
 				rawPrompt,
@@ -164,6 +222,7 @@ export function createStreamHandler(
 				...(priorTier !== undefined ? { priorTier } : {}),
 				candidates,
 				quota,
+				...(estimatedTokens !== undefined ? { estimatedTokens } : {}),
 				now,
 			},
 			{
@@ -171,6 +230,8 @@ export function createStreamHandler(
 				circuit: state.circuit,
 				latency: state.latency,
 				budgets: state.budgets,
+				uviHardMode: flags.uviHardMode,
+				confidenceThreshold: flags.confidenceThreshold,
 			},
 		);
 

@@ -67,6 +67,8 @@ export interface OmpExtensionContext {
 	modelRegistry: OmpModelRegistry;
 	ui: OmpUiContext;
 	sessionManager: OmpSessionManager;
+	/** Host-provided context token usage snapshot (shape is host-defined; adapter defensively coerces). */
+	getContextUsage(): unknown;
 	setInterval(fn: () => void, ms: number): unknown;
 	setTimeout(fn: () => void, ms: number): unknown;
 	clearTimer(handle: unknown): void;

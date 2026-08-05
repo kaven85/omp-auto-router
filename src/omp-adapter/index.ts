@@ -16,7 +16,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import type { AdapterState } from "./state";
-import { createAdapterState, refreshModels } from "./state";
+import { createAdapterState, refreshModels, collectProfileBudgets } from "./state";
 import { agentDir, loadAdapterConfigSync } from "./config";
 import { registerCommands } from "./commands";
 import { createStreamHandler } from "./router";
@@ -84,6 +84,7 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 			const cwd2 = current?.cwd ?? process.cwd();
 			const loaded2 = loadAdapterConfigSync(cwd2);
 			const fresh = createAdapterState(loaded2.config, path.join(agentDir(), "auto-router"), cwd2, loaded2.errors);
+			fresh.budgets.mergeProfileLimits(collectProfileBudgets(fresh.config));
 			if (current?.ctx) {
 				fresh.ctx = current.ctx;
 				fresh.sessionId = current.sessionId;
