@@ -56,13 +56,25 @@ describe("record + usage", () => {
 		const { tracker } = makeTracker();
 		tracker.record("anthropic", { inputTokens: 100, outputTokens: 10, cost: 1 }, DAY1);
 		tracker.record("anthropic", { inputTokens: 200, outputTokens: 20, cost: 2 }, DAY2);
-
 		const day1 = tracker.usage("anthropic", DAY1);
 		expect(day1.daily?.cost).toBe(1); // day 1 bucket untouched by day 2
 		const day2 = tracker.usage("anthropic", DAY2);
 		expect(day2.daily?.cost).toBe(2); // day 2 has only its own usage
 		expect(day2.monthly?.cost).toBe(3); // month accumulates both days
 		expect(day2.monthly?.inputTokens).toBe(300);
+	});
+
+	test("daily buckets older than the retention window are pruned; monthly survives", () => {
+		const { tracker, usageStore } = makeTracker();
+		tracker.record("anthropic", { inputTokens: 100, outputTokens: 10, cost: 1 }, DAY1);
+		// 100 days later: the DAY1 daily bucket is beyond the 62-day window.
+		const later = new Date(DAY1.getTime() + 100 * 24 * 60 * 60 * 1000);
+		tracker.record("anthropic", { inputTokens: 1, outputTokens: 1, cost: 0.1 }, later);
+		const data = usageStore.load();
+		expect(Object.keys(data?.daily ?? {})).toHaveLength(1); // only the recent day survives
+		expect(tracker.usage("anthropic", DAY1).daily).toBeUndefined();
+		// monthly rollups for the old months are retained
+		expect(Object.keys(data?.monthly ?? {}).length).toBeGreaterThan(1);
 	});
 
 	test("usage of an unknown provider or date is undefined, not fabricated", () => {

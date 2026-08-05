@@ -99,6 +99,11 @@ export const MULTI_STEP_WORD_TERMS: readonly string[] = [
 	"restructure",
 ] as const;
 
+/** Whole-word regexes for MULTI_STEP_WORD_TERMS, precompiled once at module load. */
+const MULTI_STEP_WORD_RES: readonly RegExp[] = MULTI_STEP_WORD_TERMS.map(
+	(term) => new RegExp(`\\b${term}\\b`),
+);
+
 /**
  * Repair / debug phrasing that demands reasoning about existing code before
  * acting. Unlike MULTI_STEP_KEYWORDS these do NOT push to `complex` (a bug
@@ -168,9 +173,7 @@ export function classifyComplexity(input: ClassifyComplexityInput): ComplexityRe
 	);
 	// English planning/spec/design terms matched as whole words so `plan`
 	// doesn't hit `planetary` and `spec` doesn't hit `specific`/`respect`.
-	const multiStepWordMatches = MULTI_STEP_WORD_TERMS.filter((term) =>
-		new RegExp(`\\b${term}\\b`).test(lower),
-	);
+	const multiStepWordMatches = MULTI_STEP_WORD_RES.filter((re) => re.test(lower));
 	const multiStep = multiStepMatches.length > 0 || multiStepWordMatches.length > 0;
 	// Repair/debug phrasing demands reasoning over existing code; gate on the
 	// keyword alone (these are inherently code-repair terms, intent-agnostic).

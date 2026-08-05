@@ -44,10 +44,11 @@ export interface OmpModel {
 	cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 }
 
-export interface OmpUiContext {
-	hasUI: boolean;
+export interface OmpUiContext {	hasUI: boolean;
 	notify(message: string, level: "info" | "warning" | "error"): void;
 	setStatus(text: string): void;
+	/** Optional dashboard widget surface (host-dependent; probed at runtime). */
+	setWidget?(id: string, lines: string[]): void;
 }
 
 export interface OmpSessionEntry {

@@ -271,17 +271,17 @@
 | P2 | E2 tool_result 拦截 + 测试结果检测 | 扩展 | 高 | 中 | 差异化能力，上游已验证形态 |
 | P2 | E1 before/after_provider_request 观测 | 扩展 | 高 | 中 | 统计完整性 + Mode B 载体 |
 | P2 | C2 配置加载双实现合并 + T3 sync 版测试 | 卫生+测试 | 中 | 低 | 消除「测的不是跑的」 |
-| P3 | A3/B7 balanceEndpoint 通用 balance fetcher + provider registry | 优化 | 中 | 中 | 扩 provider 的前置条件 |
-| P3 | B3 正则预编译 | 优化 | 低-中 | 极低 | 热路径零风险提速 |
-| P3 | B6 日志/用量轮转 | 优化 | 低-中 | 低 | 长期健康 |
-| P3 | B8/E8 quota 后台周期刷新（`ctx.setInterval`） | 优化+扩展 | 低-中 | 低 | UVI 时效性 |
-| P3 | E7 setWidget 路由仪表盘 | 扩展 | 中 | 低-中 | 运维可见性跃升 |
-| P3 | D6 路由分析脚本 | 扩展 | 中 | 中 | 事件日志已有，分析器缺位 |
-| P4 | B9 host ports 单例化 + 轮询收敛 | 优化 | 低 | 低 | 稳定小额省时 |
-| P4 | C1 `useage`→`usage` 别名 + README 补文档 | 卫生 | 低 | 极低 | 用户可见拼写 |
-| P4 | C3/C4 死管道/死端口清理 | 卫生 | 低 | 极低 | 收窄表面积 |
-| P4 | E5 快捷键/flag、E11 主动告警 | 扩展 | 中 | 低 | 体验增强 |
-| P4 | E6 消息渲染器、E9 LLM 工具、E12 service tier | 扩展 | 中 | 中 | 锦上添花 |
+| P3 | A3/B7 balanceEndpoint 通用 balance fetcher + provider registry | 优化 | 中 | 中 | 扩 provider 的前置条件 | ✅ 0.3.0 |
+| P3 | B3 正则预编译 | 优化 | 低-中 | 极低 | 热路径零风险提速 | ✅ 0.3.0 |
+| P3 | B6 日志/用量轮转 | 优化 | 低-中 | 低 | 长期健康 | ✅ 0.3.0 |
+| P3 | B8/E8 quota 后台周期刷新（`ctx.setInterval`） | 优化+扩展 | 低-中 | 低 | UVI 时效性 | ✅ 0.3.0 |
+| P3 | E7 setWidget 路由仪表盘 | 扩展 | 中 | 低-中 | 运维可见性跃升 | ✅ 0.3.0 |
+| P3 | D6 路由分析脚本 | 扩展 | 中 | 中 | 事件日志已有，分析器缺位 | ✅ 0.3.0（`scripts/routing-stats.ts`） |
+| P4 | B9 host ports 单例化 + 轮询收敛 | 优化 | 低 | 低 | 稳定小额省时 | ✅ 0.3.0 |
+| P4 | C1 `useage`→`usage` 别名 + README 补文档 | 卫生 | 低 | 极低 | 用户可见拼写 | ✅ 0.3.0 |
+| P4 | C3/C4 死管道/死端口清理 | 卫生 | 低 | 极低 | 收窄表面积 | ✅ 0.3.0 |
+| P4 | E5 快捷键/flag、E11 主动告警 | 扩展 | 中 | 低 | 体验增强 | 未做（API 形态需宿主内验证） |
+| P4 | E6 消息渲染器、E9 LLM 工具、E12 service tier | 扩展 | 中 | 中 | 锦上添花 | 未做（API 形态需宿主内验证） |
 | P5 | E10 memory、E13 MCP 推送、E14 user_bash、E15 compact 感知 | 扩展 | 低 | 低-中 | 远期选项，依赖外部条件 |
 | P5 | B2 conversationDepth/任务边界 | 优化 | 中 | 中 | 需要先定义「任务边界」，建议与 E15 一起做 |
 

@@ -43,15 +43,11 @@ export interface HostPorts {
 	/** omp: AuthStorage.fetchUsageReports() mapped to QuotaSnapshot[]. */
 	fetchQuota(providers: string[]): Promise<QuotaSnapshot[]>;
 
-	// ── session state (H5) ──────────────────────────────────────────────────
-	/** Persist JSON-able state under the router's custom session entry type. */
-	appendState(data: unknown): void;
-	/** Rebuild latest state from session branch entries. */
-	readState(): unknown;
-
 	// ── UI (H6) ─────────────────────────────────────────────────────────────
 	notify(message: string, level: "info" | "warning" | "error"): void;
 	setStatus(text: string): void;
+	/** Dashboard widget (optional host surface; no-op when unsupported). */
+	setWidget(lines: string[]): void;
 
 	// ── misc ────────────────────────────────────────────────────────────────
 	/** Epoch ms (injectable for tests). */

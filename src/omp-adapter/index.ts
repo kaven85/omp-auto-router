@@ -20,6 +20,7 @@ import { createAdapterState, refreshModels, collectProfileBudgets, persistTracke
 import { agentDir, loadAdapterConfigSync } from "./config";
 import { registerCommands } from "./commands";
 import { createStreamHandler } from "./router";
+import { createHostPorts, QUOTA_REFRESH_MS } from "./host-ports";
 import type { OmpExtensionApi, OmpExtensionContext, OmpProviderConfig } from "./omp-api";
 import { pickSafeEvent, redactSecrets } from "./redact";
 import type { RoutingDecision } from "../core/types";
@@ -27,6 +28,48 @@ import type { RoutingDecision } from "../core/types";
 /** Placeholder endpoint/key: the virtual provider never sends requests itself. */
 const VIRTUAL_BASE_URL = "http://127.0.0.1:0";
 const VIRTUAL_API_KEY = "OMP_AUTO_ROUTER_VIRTUAL_KEY";
+
+/** Handle of the background quota-refresh timer; at most one runs per process. */
+let quotaRefreshTimer: unknown;
+
+/**
+ * Refresh UVI quota snapshots in the background so requests never block on
+ * the auth chain when the cache just expired. Managed by the host ctx so the
+ * timer dies with the session (omp requirement).
+ */
+function startQuotaRefresh(stateRef: { current: AdapterState | undefined }, pi: OmpExtensionApi, ctx: OmpExtensionContext): void {
+	stopQuotaRefresh(ctx);
+	const state = stateRef.current;
+	if (!state?.uviEnabled) return;
+	quotaRefreshTimer = ctx.setInterval(() => {
+		const current = stateRef.current;
+		if (!current?.ctx) return;
+		const providers = new Set<string>();
+		for (const entry of current.registry.list()) {
+			const profile = current.registry.profile(entry.name);
+			if (!profile) continue;
+			for (const tier of Object.values(profile.tiers)) {
+				for (const target of tier.targets ?? []) providers.add(target.provider);
+			}
+		}
+		if (providers.size === 0) return;
+		void createHostPorts(pi, current.ctx, current)
+			.fetchQuota([...providers])
+			.then((snapshots) => {
+				current.quotaCache = { at: Date.now(), data: snapshots };
+			})
+			.catch(() => {
+				// best-effort background refresh; request-path refresh retries
+			});
+	}, QUOTA_REFRESH_MS);
+}
+
+function stopQuotaRefresh(ctx: OmpExtensionContext): void {
+	if (quotaRefreshTimer !== undefined) {
+		ctx.clearTimer(quotaRefreshTimer);
+		quotaRefreshTimer = undefined;
+	}
+}
 
 export default function autoRouterExtension(pi: OmpExtensionApi): void {
 	pi.setLabel("Auto Router");
@@ -87,7 +130,6 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 			fresh.budgets.mergeProfileLimits(collectProfileBudgets(fresh.config));
 			if (current?.ctx) {
 				fresh.ctx = current.ctx;
-				fresh.sessionId = current.sessionId;
 				refreshModels(fresh, current.ctx);
 				restoreDecisions(fresh, current.ctx);
 			}
@@ -179,6 +221,7 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 				// no UI context — swallow
 			}
 		});
+		startQuotaRefresh(stateRef, pi, ctx);
 	});
 
 	pi.on("session_branch", (event, ctx) => {
@@ -199,9 +242,9 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 	pi.on("session_shutdown", () => {
 		const current = stateRef.current;
 		if (!current) return;
+		if (current.ctx) stopQuotaRefresh(current.ctx);
 		persistTrackers(current);
 	});
-
 	// Reserved for Mode B (setModel-based routing) — inert in Mode A.
 	pi.on("input", () => {});
 

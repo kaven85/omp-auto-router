@@ -18,10 +18,10 @@ import { isProviderRetryableError } from "@oh-my-pi/pi-ai/error";
 import { failoverStream, defaultIsRetryable, defaultIsSubstantive } from "../core/failover-engine";
 import type { FeedbackTracker } from "../core/feedback-tracker";
 import { route } from "../core/pipeline";
-import type { QuotaSnapshot } from "../core/types";
+import type { QuotaSnapshot, RoutingDecision } from "../core/types";
 import type { AdapterState } from "./state";
 import { persistTrackers } from "./state";
-import { enrichCandidates, createHostPorts } from "./host-ports";
+import { enrichCandidates, createHostPorts, QUOTA_REFRESH_MS } from "./host-ports";
 import type { OmpExtensionApi, OmpExtensionContext } from "./omp-api";
 import { redactSecrets } from "./redact";
 
@@ -55,6 +55,37 @@ const RATING_DEMOTE_BELOW = 0.4;
 const TEST_FAILURE_ESCALATION_MS = 10 * 60_000;
 
 const TIER_LADDER = ["trivial", "simple", "standard", "complex"] as const;
+
+/**
+ * Compose the dashboard widget: decision line plus live budget/circuit/UVI
+ * snapshots. Rendered via the optional setWidget surface (no-op when the
+ * host lacks it).
+ */
+function buildWidgetLines(state: AdapterState, decision: RoutingDecision): string[] {
+	const lines: string[] = [
+		`${decision.profile} | tier=${decision.tier} | ${decision.target.provider}/${decision.target.model}${decision.thinking !== undefined ? ` | ${decision.thinking}` : ""}`,
+	];
+	const budgetBits: string[] = [];
+	for (const [provider, limit] of Object.entries(state.budgets.limits())) {
+		const bucket = limit.monthly ? state.budgets.usage(provider).monthly : state.budgets.usage(provider).daily;
+		const used = bucket?.cost ?? 0;
+		const pct = limit.amount > 0 ? Math.round((used / limit.amount) * 100) : 0;
+		budgetBits.push(`${provider} $${used.toFixed(2)}/$${limit.amount}${limit.monthly ? "/mo" : "/day"} (${pct}%)`);
+	}
+	if (budgetBits.length > 0) lines.push(`budgets: ${budgetBits.join(" · ")}`);
+	const openCircuits = Object.entries(state.circuit.snapshot())
+		.filter(([, rec]) => Date.now() - rec.openedAt < rec.cooldownMs)
+		.map(([key, rec]) => `${key} (${rec.consecutiveFailures}x)`);
+	if (openCircuits.length > 0) lines.push(`circuit open: ${openCircuits.join(" · ")}`);
+	if (state.uviEnabled && state.quotaCache.data.length > 0) {
+		const uviBits = state.quotaCache.data.map((snapshot) => {
+			const worst = Math.max(0, ...snapshot.windows.map((window) => window.usedFraction));
+			return `${snapshot.provider} ${(100 - worst * 100).toFixed(0)}% left`;
+		});
+		lines.push(`uvi: ${uviBits.join(" · ")}`);
+	}
+	return lines;
+}
 
 export interface StreamArgs {
 	model: { provider: string; id: string };
@@ -228,7 +259,10 @@ export function createStreamHandler(
 			priorTier = TIER_LADDER[Math.min(TIER_LADDER.indexOf(floor) + 1, TIER_LADDER.length - 1)];
 		}
 
-		const host = createHostPorts(pi, ctx, state);
+		const host =
+			state.hostPorts?.ctx === ctx
+				? state.hostPorts.host
+				: (state.hostPorts = { ctx, host: createHostPorts(pi, ctx, state) }).host;
 		const profile = state.registry.profile(profileName);
 		if (!profile) {
 			yield* failWith(`auto-router: unknown profile "${profileName}"`);
@@ -242,7 +276,7 @@ export function createStreamHandler(
 		if (state.uviEnabled && state.ctx) {
 			const providers = [...new Set(allTargets.map((t) => t.provider))];
 			const nowMs = Date.now();
-			if (nowMs - state.quotaCache.at >= 30_000) {
+			if (nowMs - state.quotaCache.at >= QUOTA_REFRESH_MS) {
 				const snapshots = await host.fetchQuota(providers);
 				state.quotaCache = { at: nowMs, data: snapshots };
 			}
@@ -251,8 +285,12 @@ export function createStreamHandler(
 			}
 		}
 		// Custom providers are discovered asynchronously during host startup.
-		// Give the live registry a bounded grace period before excluding them.
-		await waitForConfiguredModel(ctx, allTargets, args.options?.signal);
+		// Give the live registry a bounded grace period once per session; after
+		// the first successful resolve we stop polling (modelsReady).
+		if (!state.modelsReady) {
+			await waitForConfiguredModel(ctx, allTargets, args.options?.signal);
+			state.modelsReady = true;
+		}
 		// Candidates = active profile's tier targets enriched from the live host registry.
 		// The pipeline resolves the tier internally; we feed it the full profile target set.
 		const candidates = enrichCandidates(host, allTargets, state.cooldowns);
@@ -306,6 +344,7 @@ export function createStreamHandler(
 		host.setStatus(
 			`auto-router ${decision.profile} | tier=${decision.tier} (${decision.confidence.toFixed(2)}) | ${decision.target.provider}/${decision.target.model}${decision.thinking !== undefined ? ` | thinking=${decision.thinking}` : ""}`,
 		);
+		host.setWidget(buildWidgetLines(state, decision));
 
 		// Strip the router tokens before the model ever sees the prompt.
 		rewriteLastUserText(args.context, cleanPrompt);

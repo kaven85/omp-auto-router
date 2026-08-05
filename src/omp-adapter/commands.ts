@@ -6,10 +6,17 @@
  * description + example per subcommand.
  */
 
-import type { QuotaSnapshot, QuotaWindow } from "../core/types";
+import type { QuotaSnapshot, QuotaWindow, RouteTarget } from "../core/types";
 import type { AdapterState } from "./state";
-import type { OmpAutocompleteItem, OmpExtensionApi, OmpExtensionContext, OmpModel } from "./omp-api";
-import { createHostPorts } from "./host-ports";
+import type { OmpAutocompleteItem, OmpExtensionApi, OmpExtensionContext } from "./omp-api";
+import { createHostPorts, QUOTA_REFRESH_MS } from "./host-ports";
+import {
+	fetchProviderBalance,
+	PROVIDER_DISPLAY_ORDER,
+	PROVIDER_REGISTRY,
+	resolveBalanceEndpoint,
+	type ProviderBalance,
+} from "./provider-registry";
 
 export interface CommandDeps {
 	/** Current adapter state (undefined until session_start boot). */
@@ -33,16 +40,25 @@ function lines(items: (string | undefined)[]): string {
 /** Collect all unique provider names configured across every profile. */
 function getConfiguredProviders(state: AdapterState): string[] {
 	const providers = new Set<string>();
+	for (const target of getConfiguredTargets(state)) {
+		providers.add(target.provider);
+	}
+	return [...providers].sort();
+}
+
+/** Collect every target configured across every profile (all tiers). */
+function getConfiguredTargets(state: AdapterState): RouteTarget[] {
+	const targets: RouteTarget[] = [];
 	for (const entry of state.registry.list()) {
 		const profile = state.registry.profile(entry.name);
 		if (!profile) continue;
 		for (const tier of Object.values(profile.tiers)) {
 			for (const target of tier.targets ?? []) {
-				if (target.provider) providers.add(target.provider);
+				if (target.provider) targets.push(target);
 			}
 		}
 	}
-	return [...providers].sort();
+	return targets;
 }
 
 /** Format milliseconds until reset into a human-readable string. */
@@ -55,11 +71,6 @@ function formatReset(remainMs: number | undefined): string {
 	if (days > 0) return `${days}d ${hours}h`;
 	if (hours > 0) return `${hours}h ${minutes}m`;
 	return `${minutes}m`;
-}
-
-export interface ProviderBalance {
-	currency: string;
-	total: string;
 }
 
 interface QuotaTableRow {
@@ -85,41 +96,35 @@ const RIGHT_ALIGNED_QUOTA_COLUMNS: Partial<Record<keyof QuotaTableRow, true>> = 
 	balance: true,
 	resetsIn: true,
 };
-const KIMI_WINDOW_LABELS: Record<string, string> = {
-	"kimi-code:1": "5h",
-	"kimi-code:0": "weekly",
-};
-const PROVIDER_DISPLAY_ORDER: Record<string, number> = {
-	"openai-codex": 0,
-	deepseek: 1,
-	"kimi-code": 2,
-};
+const KIMI_SORT_LOCALE = "en";
 
-function formatKimiWindow(window: QuotaWindow): string {
-	return KIMI_WINDOW_LABELS[window.id] ?? window.id;
+function windowLabel(provider: string, window: QuotaWindow): string {
+	return PROVIDER_REGISTRY[provider]?.windowLabels?.[window.id] ?? window.id;
 }
 
 /**
- * Render quota reports into one stable, fixed-width table. Kimi's two
- * independent windows are intentionally paired as `5h/weekly`; every paired
- * value follows that same order.
+ * Render quota reports into one stable, fixed-width table. Providers with a
+ * resolved balance endpoint render as `balance` rows instead of plan rows;
+ * providers with registry window labels (e.g. Kimi's `5h/weekly` pair) get
+ * their windows sorted by label so paired values stay aligned.
  */
 export function formatQuotaTable(
 	snapshots: QuotaSnapshot[],
-	deepSeekBalance: ProviderBalance | undefined,
+	balances?: ReadonlyMap<string, ProviderBalance | undefined>,
 	formatResetValue: (remainMs: number | undefined) => string = formatReset,
-	includeDeepSeek = deepSeekBalance !== undefined,
 ): string[] {
 	const rows: QuotaTableRow[] = snapshots
-		.filter((snapshot) => snapshot.provider !== "deepseek" && snapshot.windows.length > 0)
+		.filter((snapshot) => balances?.has(snapshot.provider) !== true && snapshot.windows.length > 0)
 		.map((snapshot) => {
-			const windows =
-				snapshot.provider === "kimi-code"
-					? [...snapshot.windows].sort((a, b) => formatKimiWindow(a).localeCompare(formatKimiWindow(b), "en", { numeric: true }))
-					: snapshot.windows;
+			const hasLabels = PROVIDER_REGISTRY[snapshot.provider]?.windowLabels !== undefined;
+			const windows = hasLabels
+				? [...snapshot.windows].sort((a, b) =>
+						windowLabel(snapshot.provider, a).localeCompare(windowLabel(snapshot.provider, b), KIMI_SORT_LOCALE, { numeric: true }),
+					)
+				: snapshot.windows;
 			return {
 				provider: snapshot.provider,
-				window: windows.map((window) => (snapshot.provider === "kimi-code" ? formatKimiWindow(window) : window.id)).join("/"),
+				window: windows.map((window) => windowLabel(snapshot.provider, window)).join("/"),
 				type: "plan",
 				remaining: windows.map((window) => `${((1 - window.usedFraction) * 100).toFixed(1)}%`).join(" / "),
 				balance: "-",
@@ -129,13 +134,13 @@ export function formatQuotaTable(
 			};
 		});
 
-	if (includeDeepSeek) {
+	for (const [provider, balance] of balances ?? []) {
 		rows.push({
-			provider: "deepseek",
+			provider,
 			window: "n/a",
 			type: "balance",
 			remaining: "-",
-			balance: deepSeekBalance ? `${deepSeekBalance.total} ${deepSeekBalance.currency}` : "unknown",
+			balance: balance ? `${balance.total} ${balance.currency}` : "unknown",
 			resetsIn: "-",
 		});
 	}
@@ -168,32 +173,6 @@ export function formatQuotaTable(
 	];
 }
 
-function parseDeepSeekBalance(payload: unknown): ProviderBalance | undefined {
-	if (!payload || typeof payload !== "object" || !("balance_infos" in payload) || !Array.isArray(payload.balance_infos)) return undefined;
-	const [first] = payload.balance_infos;
-	if (!first || typeof first !== "object" || !("currency" in first) || !("total_balance" in first)) return undefined;
-	const { currency, total_balance: total } = first;
-	if (typeof currency !== "string" || (typeof total !== "string" && typeof total !== "number")) return undefined;
-	return { currency, total: String(total) };
-}
-
-async function fetchDeepSeekBalance(ctx: OmpExtensionContext, state: AdapterState): Promise<ProviderBalance | undefined> {
-	const model: OmpModel | undefined =
-		[...state.modelsByKey.values(), ...ctx.models.list()].find((candidate) => candidate.provider === "deepseek");
-	if (!model) return undefined;
-	try {
-		const apiKey = await ctx.modelRegistry.getApiKey(model, state.sessionId);
-		if (!apiKey) return undefined;
-		const response = await fetch("https://api.deepseek.com/user/balance", {
-			headers: { Authorization: `Bearer ${apiKey}` },
-		});
-		if (!response.ok) return undefined;
-		return parseDeepSeekBalance(await response.json());
-	} catch {
-		return undefined;
-	}
-}
-
 interface SubcommandHelp {
 	/** Subcommand name (matches the switch case). */
 	sub: string;
@@ -218,7 +197,7 @@ const SUBCOMMANDS: SubcommandHelp[] = [
 	{ sub: "uvi", usage: "show|enable|disable|refresh", description: "UVI 配额配速监控", example: "/auto-router uvi show" },
 	{ sub: "shadow", usage: "show|enable|disable", description: "影子模式（照记决策、按配置顺序路由）", example: "/auto-router shadow enable" },
 	{ sub: "rate", usage: "good|bad [comment]", description: "给上次决策打分（持久化，驱动反馈闭环）", example: "/auto-router rate good" },
-	{ sub: "useage", usage: "[page]", description: "本会话 settled 调用统计 + provider 接口余量", example: "/auto-router useage 2" },
+	{ sub: "useage", usage: "[page]", description: "本会话 settled 调用统计 + provider 接口余量（别名 usage）", example: "/auto-router useage 2" },
 	{ sub: "help", usage: "", description: "本帮助", example: "/auto-router help" },
 ];
 /** Second-level action completions per subcommand — sync with the switch below. */
@@ -576,7 +555,8 @@ async function runCommand(rawArgs: string, deps: CommandDeps, ctx: OmpExtensionC
 			);
 			return;
 		}
-		case "useage": {
+		case "useage":
+		case "usage": {
 			const page = Math.max(1, Number(arg.trim()) || 1);
 			const pageSize = 8;
 			const calls = [...state.sessionUseage.calls.entries()].sort((a, b) => b[1] - a[1]);
@@ -591,14 +571,22 @@ async function runCommand(rawArgs: string, deps: CommandDeps, ctx: OmpExtensionC
 				providerCost.set(provider, (providerCost.get(provider) ?? 0) + cost);
 			}
 
+			const targets = getConfiguredTargets(state);
 			const providers = getConfiguredProviders(state);
-			const refreshQuota = providers.length > 0 && (state.quotaCache.data.length === 0 || Date.now() - state.quotaCache.at > 30_000);
-			const includeDeepSeek = providers.includes("deepseek");
-			const [quota, deepSeekBalance] = await Promise.all([
+			const refreshQuota = providers.length > 0 && (state.quotaCache.data.length === 0 || Date.now() - state.quotaCache.at > QUOTA_REFRESH_MS);
+			// Balance-capable providers: registry default (deepseek) plus any
+			// target-level `balanceEndpoint` override from the config.
+			const balanceProviders = providers.filter((provider) => resolveBalanceEndpoint(provider, targets) !== undefined);
+			const [quota, ...fetchedBalances] = await Promise.all([
 				refreshQuota ? createHostPorts(pi, ctx, state).fetchQuota(providers) : Promise.resolve(state.quotaCache.data),
-				includeDeepSeek ? fetchDeepSeekBalance(ctx, state) : Promise.resolve(undefined),
+				...balanceProviders.map((provider) =>
+					fetchProviderBalance(ctx, state, provider, resolveBalanceEndpoint(provider, targets) ?? ""),
+				),
 			]);
 			if (refreshQuota) state.quotaCache = { at: Date.now(), data: quota };
+			const balances = new Map<string, ProviderBalance | undefined>(
+				balanceProviders.map((provider, index) => [provider, fetchedBalances[index]]),
+			);
 
 			const modelRows = slice.map(([key, count]) => {
 				const cost = state.sessionUseage.cost.get(key) ?? 0;
@@ -612,7 +600,7 @@ async function runCommand(rawArgs: string, deps: CommandDeps, ctx: OmpExtensionC
 			const providerCostRows = [...providerCost.entries()].map(
 				([provider, cost]) => `${provider}: $${cost.toFixed(4)} (session)`,
 			);
-			const quotaRows = formatQuotaTable(quota, deepSeekBalance, formatReset, includeDeepSeek);
+			const quotaRows = formatQuotaTable(quota, balances, formatReset);
 
 			ctx.ui.notify(
 				lines([

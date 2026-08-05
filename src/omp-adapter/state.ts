@@ -11,6 +11,7 @@ import { FeedbackTracker } from "../core/feedback-tracker";
 import { JsonStateStore } from "../core/state-store";
 import { LatencyTracker } from "../core/latency-tracker";
 import { ProfileRegistry } from "../core/profile-registry";
+import type { HostPorts } from "../core/host-ports";
 import type { BudgetLimit, RouterConfig, RoutingDecision, QuotaSnapshot } from "../core/types";
 import type { OmpExtensionContext, OmpModel } from "./omp-api";
 
@@ -51,8 +52,10 @@ export interface AdapterState {
 	stateStore: JsonStateStore;
 	/** Raw omp models by "provider/id" key, from ctx.models.list(). */
 	modelsByKey: Map<string, OmpModel>;
-	/** Session id supplied to model switching/getApiKey; re-read per session. */
-	sessionId: string | undefined;
+	/** Cached HostPorts bound to the adopted ctx; rebuilt when ctx changes. */
+	hostPorts: { ctx: OmpExtensionContext; host: HostPorts } | undefined;
+	/** True once a configured target resolved in the live registry; skips the per-request polling grace period. */
+	modelsReady: boolean;
 	/** Resolved project path for path-activation; mirrors ctx.cwd. */
 	cwd: string;
 	/** Last pipeline result (for /auto-router explain). */
@@ -128,7 +131,8 @@ export function createAdapterState(
 		eventLog: new EventLog(stateDir),
 		stateStore,
 		modelsByKey: new Map(),
-		sessionId: undefined,
+		hostPorts: undefined,
+		modelsReady: false,
 		cwd,
 		lastDecision: undefined,
 		doctorProbes: {

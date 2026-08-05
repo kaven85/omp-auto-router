@@ -6,10 +6,15 @@
  * routing flow. Reads tolerate a truncated final line (interrupted write).
  */
 
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { RouterEvent } from "./types";
+
+/** Default rotation threshold: keep the log under ~2 MB. */
+const DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
+/** Check file size at most once per this many appended bytes. */
+const ROTATE_CHECK_INTERVAL_BYTES = 8 * 1024;
 
 /** Append-only JSONL event log rooted at a directory. */
 export class EventLog {
@@ -19,10 +24,14 @@ export class EventLog {
 	readonly fileName: string;
 	/** Most recent swallowed IO error from `append`, if any. */
 	lastError: Error | undefined;
+	/** Rotate once the file exceeds this many bytes; the newest half is kept. */
+	private readonly maxBytes: number;
+	private bytesSinceRotateCheck = 0;
 
-	constructor(dir: string, fileName = "auto-router.events.jsonl") {
+	constructor(dir: string, fileName = "auto-router.events.jsonl", maxBytes = DEFAULT_MAX_BYTES) {
 		this.dir = dir;
 		this.fileName = fileName;
+		this.maxBytes = maxBytes;
 	}
 
 	/** Absolute path of the log file. */
@@ -33,15 +42,38 @@ export class EventLog {
 	/**
 	 * Append one event as a JSON line, creating the directory lazily.
 	 * IO errors are swallowed into `lastError` — logging must never break
-	 * routing.
+	 * routing. When the file grows past `maxBytes` it is truncated to its
+	 * newest half (checked at most every ~64 appends, so the hot path stays
+	 * a single append syscall).
 	 */
 	append(event: RouterEvent): void {
 		try {
 			mkdirSync(this.dir, { recursive: true });
-			appendFileSync(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+			const line = `${JSON.stringify(event)}\n`;
+			appendFileSync(this.filePath, line, "utf8");
+			this.bytesSinceRotateCheck += line.length;
+			if (this.bytesSinceRotateCheck >= Math.min(ROTATE_CHECK_INTERVAL_BYTES, this.maxBytes / 4)) {
+				this.bytesSinceRotateCheck = 0;
+				this.rotateIfNeeded();
+			}
 		} catch (error) {
 			this.lastError = error instanceof Error ? error : new Error(String(error));
 		}
+	}
+
+	/** Truncate the log to its newest half when it exceeds `maxBytes`. Never throws. */
+	private rotateIfNeeded(): void {
+		let raw: string;
+		try {
+			raw = readFileSync(this.filePath, "utf8");
+		} catch {
+			return;
+		}
+		if (raw.length <= this.maxBytes) return;
+		// Keep the newest half, aligned to a line boundary.
+		const tail = raw.slice(-Math.floor(this.maxBytes / 2));
+		const firstNewline = tail.indexOf("\n");
+		writeFileSync(this.filePath, firstNewline === -1 ? tail : tail.slice(firstNewline + 1), "utf8");
 	}
 
 	/**

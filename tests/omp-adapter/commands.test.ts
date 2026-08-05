@@ -290,7 +290,7 @@ describe("adapter commands", () => {
 						],
 					},
 				],
-				{ currency: "CNY", total: "65.84" },
+				new Map([["deepseek", { currency: "CNY", total: "65.84" }]]),
 				() => "1h 0m",
 			),
 		).toEqual([
@@ -326,10 +326,10 @@ describe("adapter commands", () => {
 		expect(out).toContain("请求内钉层");
 	});
 
-	test("usage is not an alias for useage", async () => {
+	test("usage works as an alias for useage", async () => {
 		const { invoke, notifies } = setup();
 		await invoke("usage");
-		expect(notifies.join("\n")).toContain("unknown subcommand: usage");
+		expect(notifies.join("\n")).toContain("usage — page 1/1");
 	});
 
 	test("unknown subcommand points at help", async () => {

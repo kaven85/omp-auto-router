@@ -44,6 +44,9 @@ function isFiniteNumber(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value);
 }
 
+/** Daily usage buckets are retained for this many days; monthly rollups are kept indefinitely. */
+export const DAILY_RETENTION_DAYS = 62;
+
 /** Validate one stats entry; corrupt entries are dropped rather than trusted. */
 function isUsageStats(value: unknown): value is ProviderUsageStats {
 	if (typeof value !== "object" || value === null) {
@@ -160,6 +163,12 @@ export class BudgetTracker {
 		const nowMs = now.getTime();
 		accumulate(this.usageData.daily, dayKey(now), provider, delta, nowMs);
 		accumulate(this.usageData.monthly, monthKey(now), provider, delta, nowMs);
+		// Bound growth: daily buckets older than the retention window are dead
+		// weight (monthly rollups keep the long-term view).
+		const cutoff = dayKey(new Date(nowMs - DAILY_RETENTION_DAYS * 24 * 60 * 60 * 1000));
+		for (const key of Object.keys(this.usageData.daily)) {
+			if (key < cutoff) delete this.usageData.daily[key];
+		}
 		this.usageStore.save(this.usageData);
 	}
 

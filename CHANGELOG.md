@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.3.0] - 2026-08-05
+
+### Added
+
+- Provider registry (`src/omp-adapter/provider-registry.ts`): provider-specific knowledge (Kimi window labels, DeepSeek balance endpoint + parser) is centralized; a target-level `balanceEndpoint` in the profile config overrides the registry default, and generic `{currency, total_balance|balance}` payloads are accepted. All balance-capable providers now render in `/auto-router useage`.
+- Background quota refresh: after `session_start`, UVI quota snapshots refresh every 30s on a host-managed timer (stopped on `session_shutdown`), so requests no longer block on the auth chain when the cache just expired.
+- Dashboard widget: after each decision a profile/budget/circuit/UVI overview is rendered via the optional `setWidget` surface (probed at runtime; silent no-op when the host lacks it).
+- `usage` is now an alias for `/auto-router useage`.
+- Analytics script `scripts/routing-stats.ts`: aggregates the event log (decisions per profile/tier/target, failovers, top errors) with an optional `--tail N` window.
+
+### Changed
+
+- Event log rotates past ~2 MB, keeping the newest half (checked at most every ~8 KB of appends).
+- Budget daily buckets older than 62 days are pruned on record; monthly rollups are retained.
+- Keyword/word-boundary regexes in the intent and complexity classifiers are precompiled once at module load instead of per request.
+- HostPorts are cached per adopted ctx instead of being rebuilt per request, and the configured-model discovery grace period runs once per session (`modelsReady`).
+
+### Removed
+
+- Dead `HostPorts.appendState`/`readState` session ports (never consumed; persistence goes through `appendEntry` directly) and the never-assigned `sessionId` state field.
+
 ## [0.2.0] - 2026-08-05
 
 ### Added
