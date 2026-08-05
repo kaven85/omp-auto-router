@@ -168,4 +168,54 @@ describe("extension entry (boot + ctx adoption)", () => {
 			expect(decision).toBeDefined();
 		});
 	});
+
+	test("a failing test command escalates the next request by one tier", async () => {
+		await withAgentDir(BASE_CONFIG, async () => {
+			const api = new MockExtensionApi();
+			api.models = MODELS;
+			autoRouterExtension(api);
+			const ctx = api.makeCtx();
+			await api.fire("session_start", ctx);
+			await flushBoot();
+
+			await api.fire("tool_result", ctx, {
+				toolName: "bash",
+				input: { command: "bun test tests/" },
+				isError: true,
+			});
+
+			streamCalls.length = 0;
+			const stream = api.providers.get("auto-router")!.streamSimple!(
+				{ provider: "auto-router", id: "main", api: "auto-router" },
+				{ messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] },
+				{},
+			);
+			for await (const _event of stream as AsyncGenerator<unknown>) { /* drain */ }
+			// Trivial prompt, but the recent test failure raises the floor to standard.
+			expect(streamCalls).toEqual([{ provider: "anthropic", model: "sonnet" }]);
+		});
+	});
+
+	test("a passing test command clears the escalation", async () => {
+		await withAgentDir(BASE_CONFIG, async () => {
+			const api = new MockExtensionApi();
+			api.models = MODELS;
+			autoRouterExtension(api);
+			const ctx = api.makeCtx();
+			await api.fire("session_start", ctx);
+			await flushBoot();
+
+			await api.fire("tool_result", ctx, { toolName: "bash", input: { command: "bun test" }, isError: true });
+			await api.fire("tool_result", ctx, { toolName: "bash", input: { command: "bun test" }, isError: false });
+
+			streamCalls.length = 0;
+			const stream = api.providers.get("auto-router")!.streamSimple!(
+				{ provider: "auto-router", id: "main", api: "auto-router" },
+				{ messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] },
+				{},
+			);
+			for await (const _event of stream as AsyncGenerator<unknown>) { /* drain */ }
+			expect(streamCalls).toEqual([{ provider: "deepseek", model: "flash" }]);
+		});
+	});
 });

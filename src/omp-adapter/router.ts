@@ -16,6 +16,7 @@ import { streamSimple } from "@oh-my-pi/pi-ai";
 import { isProviderRetryableError } from "@oh-my-pi/pi-ai/error";
 
 import { failoverStream, defaultIsRetryable, defaultIsSubstantive } from "../core/failover-engine";
+import type { FeedbackTracker } from "../core/feedback-tracker";
 import { route } from "../core/pipeline";
 import type { QuotaSnapshot } from "../core/types";
 import type { AdapterState } from "./state";
@@ -23,6 +24,37 @@ import { persistTrackers } from "./state";
 import { enrichCandidates, createHostPorts } from "./host-ports";
 import type { OmpExtensionApi, OmpExtensionContext } from "./omp-api";
 import { redactSecrets } from "./redact";
+
+/** Transient exclusion window after a target fails within a failover chain. */
+const COOLDOWN_AFTER_FAILURE_MS = 5 * 60_000;
+
+/**
+ * Rating feedback loop (demote-only): candidates with enough ratings and a
+ * low good fraction move behind the rest. Demotion is stable and never
+ * removes a candidate — a badly rated target still serves as failover.
+ */
+function demotePoorlyRated<T extends { provider: string; model: string }>(
+	order: readonly T[],
+	ratings: FeedbackTracker,
+): T[] {
+	const poorly = (t: T): boolean => {
+		const stats = ratings.statsFor(t.provider, t.model);
+		return stats.total >= RATING_MIN_SAMPLES && stats.goodFraction < RATING_DEMOTE_BELOW;
+	};
+	const front = order.filter((t) => !poorly(t));
+	const back = order.filter(poorly);
+	return back.length === 0 ? [...order] : [...front, ...back];
+}
+
+/** Minimum ratings before a candidate's good fraction is trusted. */
+const RATING_MIN_SAMPLES = 5;
+/** Good fraction below which a candidate is demoted. */
+const RATING_DEMOTE_BELOW = 0.4;
+
+/** How long a failed test/build command keeps the tier floor raised. */
+const TEST_FAILURE_ESCALATION_MS = 10 * 60_000;
+
+const TIER_LADDER = ["trivial", "simple", "standard", "complex"] as const;
 
 export interface StreamArgs {
 	model: { provider: string; id: string };
@@ -77,9 +109,11 @@ function buildFactory(
 	pi: OmpExtensionApi,
 	context: StreamArgs["context"],
 	options: StreamArgs["options"],
+	onTargetStart?: (target: { provider: string; model: string }) => void,
 ) {
 	const host = createHostPorts(pi, state.ctx!, state);
 	return async function* factory(target: { provider: string; model: string }) {
+		onTargetStart?.(target);
 		const model = state.ctx?.models.resolve(`${target.provider}/${target.model}`);
 		if (!model) {
 			throw new Error(`auto-router: target not resolvable: ${target.provider}/${target.model}`);
@@ -181,7 +215,18 @@ export function createStreamHandler(
 		}
 		const profileName = args.model.id.replace(/^auto-router\//, "");
 		const { text: rawPrompt, hasImages } = lastUserText(args.context);
-		const priorTier = state.decisions.last()?.tier as "trivial" | "simple" | "standard" | "complex" | undefined;
+		let priorTier = state.decisions.last()?.tier as "trivial" | "simple" | "standard" | "complex" | undefined;
+		// Test/build failure escalation: for a short window after a failing test
+		// command the tier floor rises one level — the next prompt is very likely
+		// a debugging task that warrants a stronger model.
+		if (
+			state.testFailureAt !== undefined &&
+			Date.now() - state.testFailureAt < TEST_FAILURE_ESCALATION_MS &&
+			priorTier !== "complex"
+		) {
+			const floor = priorTier ?? "simple";
+			priorTier = TIER_LADDER[Math.min(TIER_LADDER.indexOf(floor) + 1, TIER_LADDER.length - 1)];
+		}
 
 		const host = createHostPorts(pi, ctx, state);
 		const profile = state.registry.profile(profileName);
@@ -210,7 +255,7 @@ export function createStreamHandler(
 		await waitForConfiguredModel(ctx, allTargets, args.options?.signal);
 		// Candidates = active profile's tier targets enriched from the live host registry.
 		// The pipeline resolves the tier internally; we feed it the full profile target set.
-		const candidates = enrichCandidates(host, allTargets);
+		const candidates = enrichCandidates(host, allTargets, state.cooldowns);
 
 		const now = new Date();
 		const flags = createPipelineFlags();
@@ -245,6 +290,12 @@ export function createStreamHandler(
 				tierCfg?.targets.filter((t) => host.isHealthy(t)) ?? [];
 			decision.orderedCandidates = finalOrder;
 			decision.target = finalOrder[0] ?? decision.target;
+		} else {
+			// Rating feedback loop: candidates the user keeps rating badly are
+			// demoted to the back of the chain (stable — relative order kept).
+			finalOrder = demotePoorlyRated(finalOrder, state.ratings);
+			decision.orderedCandidates = finalOrder;
+			decision.target = finalOrder[0] ?? decision.target;
 		}
 
 		// Record + persist the decision for /auto-router explain.
@@ -261,6 +312,7 @@ export function createStreamHandler(
 
 		// Failover across the ordered chain; thinking-only partials stay failover-eligible.
 		const started = Date.now();
+		const targetStarts = new Map<string, number>();
 		let settledTarget: { provider: string; model: string } | undefined;
 		const hooks = {
 			// Fail over on transient provider errors (omp classifier) OR on
@@ -270,7 +322,12 @@ export function createStreamHandler(
 				isProviderRetryableError(error) || defaultIsRetryable(error),
 			isSubstantive: defaultIsSubstantive,
 			onTargetFailed: (target: { provider: string; model: string }, error: unknown) => {
-				state.circuit.recordFailure(`${target.provider}/${target.model}`, Date.now());
+				const key = `${target.provider}/${target.model}`;
+				state.circuit.recordFailure(key, Date.now());
+				// Transient cooldown: the solver excludes the target for a few
+				// minutes so subsequent requests skip it instead of rediscovering
+				// the failure on every prompt.
+				state.cooldowns.set(key, Date.now() + COOLDOWN_AFTER_FAILURE_MS);
 				state.eventLog.append({
 					type: "error",
 					at: Date.now(),
@@ -290,8 +347,14 @@ export function createStreamHandler(
 			},
 			onTargetSettled: (target: { provider: string; model: string }) => {
 				settledTarget = target;
-				state.circuit.recordSuccess(`${target.provider}/${target.model}`);
-				state.latency.record(`${target.provider}/${target.model}`, Date.now() - started);
+				const key = `${target.provider}/${target.model}`;
+				state.circuit.recordSuccess(key);
+				state.cooldowns.delete(key);
+				// Latency is measured from THIS target's stream start, not the
+				// failover chain's — otherwise a slow dead first candidate would
+				// poison the rolling mean of the fallback that actually answered.
+				const targetStart = targetStarts.get(key) ?? started;
+				state.latency.record(key, Date.now() - targetStart);
 				if (!state.shadowEnabled) {
 					const key = `${target.provider}/${target.model}`;
 					state.sessionUseage.calls.set(key, (state.sessionUseage.calls.get(key) ?? 0) + 1);
@@ -307,7 +370,9 @@ export function createStreamHandler(
 			},
 		};
 
-		const factory = buildFactory(state, pi, args.context, args.options);
+		const factory = buildFactory(state, pi, args.context, args.options, (target) => {
+			targetStarts.set(`${target.provider}/${target.model}`, Date.now());
+		});
 
 		// Apply the tier's thinking level to the real request: set before the
 		// delegate stream starts, restore the session's previous level when the

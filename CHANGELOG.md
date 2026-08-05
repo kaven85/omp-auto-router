@@ -1,6 +1,15 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.0] - 2026-08-05
+
+### Added
+
+- Post-failure cooldown: a target that fails inside a failover chain is excluded for 5 minutes on subsequent requests; a success clears it. Wires up the previously dead `cooldownUntil` solver path.
+- Rating feedback loop: candidates with ≥5 ratings and <40% good are stably demoted to the back of the chain (never removed); `/auto-router explain` now shows per-candidate rating stats.
+- Test-failure escalation: a failing test/build bash command raises the tier floor by one level for 10 minutes; a passing run clears it (detected via `tool_result` interception).
+- `BudgetTracker.mergeProfileLimits()` / `clearProfileLimits()` so config-provided budget defaults and user overrides coexist.
+- Circuit breaker and latency rolling means now persist across restarts (`circuit.json` / `latency.json`), restored at state creation and saved after each settled stream and on `session_shutdown`.
+- Entry-level tests for boot, session ctx adoption rules, path activation, and decision restore (`tests/omp-adapter/index.test.ts`); direct `fetchQuota` / `enrichCandidates` tests (`tests/omp-adapter/host-ports.test.ts`).
 
 ### Fixed
 
@@ -8,12 +17,11 @@
 - Context token estimation now uses the host's `ctx.getContextUsage()` when available, with a fallback that sums all visible text (messages + system prompts). This makes `long`/`epic` classification and `@long` constraints reliable in real conversations.
 - `OMP_AUTO_ROUTER_UVI_HARD` and `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD` environment flags are now wired into the routing pipeline.
 - The tier's `thinking` level is now applied to the real request: set before the delegate stream starts and restored to the session's previous level afterwards (skipped in shadow mode).
+- Failover latency is measured per target (from its own stream start), so a slow dead first candidate no longer poisons the fallback's rolling mean.
 
-### Added
+### Changed
 
-- `BudgetTracker.mergeProfileLimits()` / `clearProfileLimits()` so config-provided budget defaults and user overrides coexist.
-- Circuit breaker and latency rolling means now persist across restarts (`circuit.json` / `latency.json`), restored at state creation and saved after each settled stream and on `session_shutdown`.
-- Entry-level tests for boot, session ctx adoption rules, path activation, and decision restore (`tests/omp-adapter/index.test.ts`); direct `fetchQuota` / `enrichCandidates` tests (`tests/omp-adapter/host-ports.test.ts`).
+- Adapter config loading: sync and async variants now share one layering implementation (`assemble`), eliminating drift between the production (sync) and tested (async) paths; a parity test locks them together.
 
 ## [0.1.0] - 2026-08-05
 

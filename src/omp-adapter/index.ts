@@ -21,7 +21,7 @@ import { agentDir, loadAdapterConfigSync } from "./config";
 import { registerCommands } from "./commands";
 import { createStreamHandler } from "./router";
 import type { OmpExtensionApi, OmpExtensionContext, OmpProviderConfig } from "./omp-api";
-import { pickSafeEvent } from "./redact";
+import { pickSafeEvent, redactSecrets } from "./redact";
 import type { RoutingDecision } from "../core/types";
 
 /** Placeholder endpoint/key: the virtual provider never sends requests itself. */
@@ -204,7 +204,34 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 
 	// Reserved for Mode B (setModel-based routing) — inert in Mode A.
 	pi.on("input", () => {});
+
+	// Test/build outcome detection: a failed test command temporarily raises
+	// the tier floor (see TEST_FAILURE_ESCALATION_MS in router.ts) — debugging
+	// benefits from a stronger model; a passing run clears the escalation.
+	pi.on("tool_result", (event) => {
+		const current = stateRef.current;
+		if (!current || typeof event !== "object" || event === null) return;
+		if (!("toolName" in event) || event.toolName !== "bash") return;
+		const input = "input" in event ? event.input : undefined;
+		const command =
+			typeof input === "object" && input !== null && "command" in input && typeof input.command === "string"
+				? input.command
+				: "";
+		if (!TEST_COMMAND_RE.test(command)) return;
+		const failed = "isError" in event && event.isError === true;
+		current.testFailureAt = failed ? Date.now() : undefined;
+		current.eventLog.append({
+			type: failed ? "error" : "decision",
+			at: Date.now(),
+			what: failed ? "test-failure" : "test-pass",
+			command: redactSecrets(command.slice(0, 200)),
+		});
+	});
 }
+
+/** Matches common test/build invocations in bash tool commands. */
+const TEST_COMMAND_RE =
+	/\b(?:bun|npm|pnpm|yarn)\s+(?:run\s+)?(?:test|build)\b|\b(?:vitest|jest|pytest|go\s+test|cargo\s+test)\b|\btsc\b/;
 
 function restoreDecisions(state: AdapterState, ctx: OmpExtensionContext): void {
 	const prior: RoutingDecision[] = [];

@@ -445,6 +445,12 @@ async function runCommand(rawArgs: string, deps: CommandDeps, ctx: OmpExtensionC
 					`target: ${last.decision.target.provider}/${last.decision.target.model}`,
 					`chain: ${last.decision.orderedCandidates.map((t) => `${t.provider}/${t.model}`).join(" → ")}`,
 					`tokens≈${last.decision.estimatedTokens}`,
+					...last.decision.orderedCandidates.map((t) => {
+						const stats = state.ratings.statsFor(t.provider, t.model);
+						return stats.total > 0
+							? `ratings ${t.provider}/${t.model}: ${stats.good}👍/${stats.bad}👎 (${(stats.goodFraction * 100).toFixed(0)}% good)`
+							: `ratings ${t.provider}/${t.model}: none yet`;
+					}),
 					...last.decision.reasoning.map((r) => `· ${r}`),
 				]),
 				"info",

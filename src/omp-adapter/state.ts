@@ -77,6 +77,10 @@ export interface AdapterState {
 	shadowEnabled: boolean;
 	/** Throttled quota fetch cache: { at, data }. */
 	quotaCache: { at: number; data: QuotaSnapshot[] };
+	/** "provider/model" → epoch ms until which the target is excluded (transient cooldown after failure). */
+	cooldowns: Map<string, number>;
+	/** Epoch ms of the most recent test/build tool failure; drives temporary tier escalation. */
+	testFailureAt: number | undefined;
 	/** User ratings of routing decisions. */
 	ratings: FeedbackTracker;
 	/** Per-session settled-call stats (normal mode only; shadow pauses counting). */
@@ -140,6 +144,8 @@ export function createAdapterState(
 		uviEnabled: true,
 		shadowEnabled: false,
 		quotaCache: { at: 0, data: [] },
+		cooldowns: new Map(),
+		testFailureAt: undefined,
 		ratings: new FeedbackTracker(ratingsStore),
 		sessionUseage: { calls: new Map(), cost: new Map(), thinking: new Map() },
 	};

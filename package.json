@@ -1,6 +1,6 @@
 {
 	"name": "omp-auto-router",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Profile-based, complexity-aware auto router extension for Oh My Pi (omp)",
 	"type": "module",
 	"private": true,

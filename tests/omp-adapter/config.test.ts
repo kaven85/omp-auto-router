@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { loadAdapterConfig } from "../../src/omp-adapter/config";
+import { loadAdapterConfig, loadAdapterConfigSync } from "../../src/omp-adapter/config";
 
 const USER_CFG = `
 active: premium
@@ -54,6 +54,29 @@ describe("adapter config", () => {
 
 	afterEach(() => {
 		for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("sync and async loaders produce identical results", async () => {
+		const agent = makeAgentDir();
+		writeFileSync(join(agent, "auto-router.yml"), USER_CFG);
+		const prev = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = agent;
+		try {
+			const cwd = makeProjectDir();
+			writeFileSync(join(cwd, ".omp", "auto-router.yml"), PROJECT_CFG);
+			const asyncLoaded = await loadAdapterConfig(cwd);
+			const syncLoaded = loadAdapterConfigSync(cwd);
+			expect(syncLoaded).toEqual(asyncLoaded);
+
+			// And with no configs at all.
+			const emptyAgent = makeAgentDir();
+			process.env.PI_CODING_AGENT_DIR = emptyAgent;
+			const emptyCwd = makeProjectDir();
+			expect(loadAdapterConfigSync(emptyCwd)).toEqual(await loadAdapterConfig(emptyCwd));
+		} finally {
+			if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = prev;
+		}
 	});
 
 	test("loads user config from agent dir", async () => {
