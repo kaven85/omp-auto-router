@@ -1,5 +1,5 @@
 import { describe, expect, test, mock } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -123,6 +123,84 @@ describe("adapter router (Mode A)", () => {
 		expect(state.lastDecision?.decision.tier).toBe("complex");
 		expect(api.entries.some((e) => e.customType === "com.omp.auto-router.decision")).toBe(true);
 		rmSync(dir, { recursive: true, force: true });
+	});
+	test("models discovered after the initial snapshot remain routable", async () => {
+		const api = new MockExtensionApi();
+		const dir = mkdtempSync(join(tmpdir(), "ar-router-late-model-"));
+		const state = createAdapterState(CONFIG, dir, "/tmp/work");
+		const ctx = api.makeCtx({
+			setTimeout: (fn) => {
+				queueMicrotask(fn);
+				return 0;
+			},
+		});
+		refreshModels(state, ctx);
+		queueMicrotask(() => {
+			api.models = MODELS;
+		});
+		streamCalls.length = 0;
+		streamBehavior = async function* () {
+			yield { type: "text_delta", contentIndex: 0, delta: "ok", partial: {} };
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		retryableBehavior = () => true;
+		state.ctx = ctx;
+
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context: contextWithPrompt("@reasoning prove primes"),
+			options: {},
+		});
+		const types: string[] = [];
+		for await (const event of handler) types.push(event.type);
+
+		expect(types).toEqual(["text_delta", "done"]);
+		expect(streamCalls).toEqual([{ provider: "anthropic", model: "opus" }]);
+		rmSync(dir, { recursive: true, force: true });
+	});
+	test("reload retains session context for subsequent streams", async () => {
+		const configDir = mkdtempSync(join(tmpdir(), "ar-router-reload-"));
+		mkdirSync(join(configDir, "auto-router"), { recursive: true });
+		writeFileSync(
+			join(configDir, "auto-router.yml"),
+			[
+				"active: premium",
+				"profiles:",
+				"  premium:",
+				"    description: test",
+				"    defaultTier: standard",
+				"    tiers:",
+				"      trivial: { thinking: low, targets: [{ provider: anthropic, model: sonnet }] }",
+				"      simple: { thinking: low, targets: [{ provider: anthropic, model: sonnet }] }",
+				"      standard: { thinking: medium, targets: [{ provider: anthropic, model: sonnet }] }",
+				"      complex: { thinking: high, targets: [{ provider: anthropic, model: opus }] }",
+			].join("\n"),
+		);
+		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = configDir;
+		try {
+			const { default: autoRouterExtension } = await import("../../src/omp-adapter/index");
+			const api = new MockExtensionApi();
+			api.models = MODELS;
+			autoRouterExtension(api);
+			const ctx = api.makeCtx();
+			await api.fire("session_start", ctx);
+			await api.commands.get("auto-router")!.handler("reload", ctx);
+			streamBehavior = async function* () {
+				yield { type: "done", reason: "stop", message: {} };
+			};
+			const stream = api.providers.get("auto-router")!.streamSimple!(
+				{ provider: "auto-router", id: "premium", api: "auto-router" },
+				contextWithPrompt("hello"),
+			);
+			const events = [];
+			for await (const event of stream) events.push(event);
+			expect(events).toEqual([{ type: "done", reason: "stop", message: {} }]);
+		} finally {
+			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+			rmSync(configDir, { recursive: true, force: true });
+		}
 	});
 	test("rewriting user text keeps image parts", async () => {
 		const { api, state, ctx, dir } = setup();

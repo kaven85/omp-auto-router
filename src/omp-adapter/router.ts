@@ -79,7 +79,7 @@ function buildFactory(
 ) {
 	const host = createHostPorts(pi, state.ctx!, state);
 	return async function* factory(target: { provider: string; model: string }) {
-		const model = state.modelsByKey.get(`${target.provider}/${target.model}`);
+		const model = state.ctx?.models.resolve(`${target.provider}/${target.model}`);
 		if (!model) {
 			throw new Error(`auto-router: target not resolvable: ${target.provider}/${target.model}`);
 		}
@@ -92,6 +92,23 @@ function buildFactory(
 			yield event as never;
 		}
 	};
+}
+async function waitForConfiguredModel(
+	ctx: OmpExtensionContext,
+	targets: Array<{ provider: string; model: string }>,
+	signal?: AbortSignal,
+): Promise<void> {
+	const retryDelayMs = 50;
+	const maxAttempts = 100;
+	for (let attempt = 0; attempt <= maxAttempts; attempt++) {
+		for (const target of targets) {
+			if (ctx.models.resolve(`${target.provider}/${target.model}`)) return;
+		}
+		if (attempt === maxAttempts || signal?.aborted) return;
+		await new Promise<void>((resolve) => {
+			ctx.setTimeout(resolve, retryDelayMs);
+		});
+	}
 }
 
 export function createStreamHandler(
@@ -109,8 +126,6 @@ export function createStreamHandler(
 		const { text: rawPrompt, hasImages } = lastUserText(args.context);
 		const priorTier = state.decisions.last()?.tier as "trivial" | "simple" | "standard" | "complex" | undefined;
 
-		// Candidates = active profile's tier targets enriched from the host registry.
-		// The pipeline resolves the tier internally; we feed it the full profile target set.
 		const host = createHostPorts(pi, ctx, state);
 		const profile = state.registry.profile(profileName);
 		if (!profile) {
@@ -118,7 +133,6 @@ export function createStreamHandler(
 			return;
 		}
 		const allTargets = Object.values(profile.tiers).flatMap((t) => t.targets);
-		const candidates = enrichCandidates(host, allTargets);
 
 		// Quota snapshots feed UVI; throttled to once per 30s.
 		let quota: Record<string, QuotaSnapshot> = {};
@@ -133,6 +147,12 @@ export function createStreamHandler(
 				quota[snapshot.provider] = snapshot;
 			}
 		}
+		// Custom providers are discovered asynchronously during host startup.
+		// Give the live registry a bounded grace period before excluding them.
+		await waitForConfiguredModel(ctx, allTargets, args.options?.signal);
+		// Candidates = active profile's tier targets enriched from the live host registry.
+		// The pipeline resolves the tier internally; we feed it the full profile target set.
+		const candidates = enrichCandidates(host, allTargets);
 
 		const now = new Date();
 		const { decision, cleanPrompt } = route(
@@ -160,7 +180,7 @@ export function createStreamHandler(
 		if (state.shadowEnabled) {
 			const tierCfg = state.registry.tierConfig(profileName, decision.tier);
 			finalOrder =
-				tierCfg?.targets.filter((t) => state.modelsByKey.has(`${t.provider}/${t.model}`) && host.isHealthy(t)) ?? [];
+				tierCfg?.targets.filter((t) => host.isHealthy(t)) ?? [];
 			decision.orderedCandidates = finalOrder;
 			decision.target = finalOrder[0] ?? decision.target;
 		}
@@ -242,7 +262,7 @@ function recordUsage(
 	usage: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } | undefined,
 ): void {
 	if (!usage) return;
-	const model = state.modelsByKey.get(`${target.provider}/${target.model}`);
+	const model = state.ctx?.models.resolve(`${target.provider}/${target.model}`);
 	const cost = model?.cost;
 	const inputTokens = usage.input ?? 0;
 	const outputTokens = usage.output ?? 0;

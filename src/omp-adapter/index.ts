@@ -84,6 +84,12 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 			const cwd2 = current?.cwd ?? process.cwd();
 			const loaded2 = loadAdapterConfigSync(cwd2);
 			const fresh = createAdapterState(loaded2.config, path.join(agentDir(), "auto-router"), cwd2, loaded2.errors);
+			if (current?.ctx) {
+				fresh.ctx = current.ctx;
+				fresh.sessionId = current.sessionId;
+				refreshModels(fresh, current.ctx);
+				restoreDecisions(fresh, current.ctx);
+			}
 			stateRef.current = fresh;
 			return Promise.resolve(loaded2.errors);
 		},

@@ -17,11 +17,9 @@ export function createHostPorts(
 	ctx: OmpExtensionContext,
 	state: AdapterState,
 ): HostPorts {
-	const raw = (key: string) => state.modelsByKey.get(key);
-
 	return {
 		listModels(): HostModel[] {
-			return [...state.modelsByKey.values()].map(wrapModel);
+			return ctx.models.list().map(wrapModel);
 		},
 
 		resolveModel(spec: string): HostModel | undefined {
@@ -30,17 +28,17 @@ export function createHostPorts(
 		},
 
 		async getApiKey(target: RouteTarget): Promise<string | undefined> {
-			const model = raw(`${target.provider}/${target.model}`);
+			const model = ctx.models.resolve(`${target.provider}/${target.model}`);
 			if (!model) return undefined;
 			return ctx.modelRegistry.getApiKey(model, state.sessionId);
 		},
 
 		isHealthy(target: RouteTarget): boolean {
-			return raw(`${target.provider}/${target.model}`) !== undefined;
+			return ctx.models.resolve(`${target.provider}/${target.model}`) !== undefined;
 		},
 
 		async setModel(key: string): Promise<boolean> {
-			const model = raw(key);
+			const model = ctx.models.resolve(key);
 			if (!model) return false;
 			return pi.setModel(model);
 		},
