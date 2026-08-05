@@ -124,6 +124,55 @@ describe("adapter router (Mode A)", () => {
 		expect(api.entries.some((e) => e.customType === "com.omp.auto-router.decision")).toBe(true);
 		rmSync(dir, { recursive: true, force: true });
 	});
+	test("thinking level is applied during the delegate stream and restored afterwards", async () => {
+		const { api, state } = setup();
+		streamBehavior = async function* () {
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		state.ctx = api.makeCtx();
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context: contextWithPrompt("@reasoning prove primes"),
+			options: {},
+		});
+		for await (const _event of handler) { /* drain */ }
+		// complex tier config thinking=high; mock's pre-existing level is "medium".
+		expect(api.thinkingLevels).toEqual(["high", "medium"]);
+	});
+
+	test("thinking level is not touched in shadow mode", async () => {
+		const { api, state } = setup();
+		state.shadowEnabled = true;
+		streamBehavior = async function* () {
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		state.ctx = api.makeCtx();
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context: contextWithPrompt("@reasoning prove primes"),
+			options: {},
+		});
+		for await (const _event of handler) { /* drain */ }
+		expect(api.thinkingLevels).toEqual([]);
+	});
+
+	test("circuit and latency snapshots persist after a stream settles", async () => {
+		const { api, state, dir } = setup();
+		streamBehavior = async function* () {
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		state.ctx = api.makeCtx();
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context: contextWithPrompt("@reasoning prove primes"),
+			options: {},
+		});
+		for await (const _event of handler) { /* drain */ }
+		// A fresh state over the same dir warm-starts from the persisted snapshots.
+		const revived = createAdapterState(CONFIG, dir, "/tmp/work");
+		expect(revived.latency.average("anthropic/opus")).toBeGreaterThanOrEqual(0);
+	});
+
 	test("uses ctx.getContextUsage() as the authoritative token estimate", async () => {
 		const { api, state, ctx } = setup();
 		streamBehavior = async function* () {

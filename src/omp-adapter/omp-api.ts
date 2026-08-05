@@ -133,6 +133,7 @@ export interface OmpExtensionApi {
 	registerCommand(name: string, def: OmpCommandDef): void;
 	setModel(model: OmpModel): Promise<boolean>;
 	setThinkingLevel(level: string): void;
+	getThinkingLevel?(): string;
 	appendEntry(customType: string, data?: unknown): void;
 	logger: { debug(...args: unknown[]): void; info(...args: unknown[]): void; warn(...args: unknown[]): void; error(...args: unknown[]): void };
 }

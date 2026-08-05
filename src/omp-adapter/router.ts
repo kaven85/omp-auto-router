@@ -19,6 +19,7 @@ import { failoverStream, defaultIsRetryable, defaultIsSubstantive } from "../cor
 import { route } from "../core/pipeline";
 import type { QuotaSnapshot } from "../core/types";
 import type { AdapterState } from "./state";
+import { persistTrackers } from "./state";
 import { enrichCandidates, createHostPorts } from "./host-ports";
 import type { OmpExtensionApi, OmpExtensionContext } from "./omp-api";
 import { redactSecrets } from "./redact";
@@ -307,11 +308,47 @@ export function createStreamHandler(
 		};
 
 		const factory = buildFactory(state, pi, args.context, args.options);
-		for await (const event of failoverStream(finalOrder, factory, hooks, { signal: args.options?.signal })) {
-			if (event.type === "done" && settledTarget && typeof event.message === "object" && event.message !== null) {
-				recordUsage(state, settledTarget, (event.message as { usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }).usage);
+
+		// Apply the tier's thinking level to the real request: set before the
+		// delegate stream starts, restore the session's previous level when the
+		// stream ends (including abort/early-return of the generator). Skipped
+		// in shadow mode, which must not mutate session behavior.
+		const canSteerThinking =
+			decision.thinking !== undefined &&
+			!state.shadowEnabled &&
+			typeof pi.setThinkingLevel === "function";
+		const priorThinking =
+			canSteerThinking && typeof pi.getThinkingLevel === "function" ? pi.getThinkingLevel() : undefined;
+		if (canSteerThinking && decision.thinking !== undefined) {
+			try {
+				pi.setThinkingLevel(decision.thinking);
+			} catch (error) {
+				state.eventLog.append({
+					type: "error",
+					at: Date.now(),
+					what: "setThinkingLevel",
+					error: redactSecrets(String(error)),
+				});
 			}
-			yield event;
+		}
+
+		try {
+			for await (const event of failoverStream(finalOrder, factory, hooks, { signal: args.options?.signal })) {
+				if (event.type === "done" && settledTarget && typeof event.message === "object" && event.message !== null) {
+					recordUsage(state, settledTarget, (event.message as { usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }).usage);
+				}
+				yield event;
+			}
+		} finally {
+			if (canSteerThinking && priorThinking !== undefined) {
+				try {
+					pi.setThinkingLevel(priorThinking);
+				} catch {
+					// restore best-effort; the next request re-steers anyway
+				}
+			}
+			// Warm-start persistence: keep circuit/latency snapshots across restarts.
+			persistTrackers(state);
 		}
 	})();
 }

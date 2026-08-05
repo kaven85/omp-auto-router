@@ -105,6 +105,41 @@ export class CircuitBreaker {
 		}
 	}
 
+	/**
+	 * Current per-key records, for persistence across restarts.
+	 * `openedAt` is epoch ms; consumers must tolerate clock drift on restore.
+	 */
+	snapshot(): Record<string, { consecutiveFailures: number; openedAt: number; cooldownMs: number }> {
+		const out: Record<string, { consecutiveFailures: number; openedAt: number; cooldownMs: number }> = {};
+		for (const [key, rec] of this.records) {
+			out[key] = { ...rec };
+		}
+		return out;
+	}
+
+	/**
+	 * Replace all state with a previously taken snapshot. Entries with
+	 * non-finite or negative fields are skipped. `openedAt` is kept verbatim —
+	 * the state machine resolves open/half-open against the caller's clock, so
+	 * a restored circuit whose cooldown already elapsed simply admits a trial.
+	 */
+	restore(snapshot: Record<string, { consecutiveFailures: number; openedAt: number; cooldownMs: number }>): void {
+		this.records.clear();
+		for (const [key, rec] of Object.entries(snapshot)) {
+			if (
+				!rec ||
+				!Number.isFinite(rec.consecutiveFailures) || rec.consecutiveFailures < 0 ||
+				!Number.isFinite(rec.openedAt) || rec.openedAt < 0 ||
+				!Number.isFinite(rec.cooldownMs) || rec.cooldownMs <= 0
+			) continue;
+			this.records.set(key, {
+				consecutiveFailures: Math.floor(rec.consecutiveFailures),
+				openedAt: rec.openedAt,
+				cooldownMs: Math.min(rec.cooldownMs, MAX_COOLDOWN_MS),
+			});
+		}
+	}
+
 	/** Drop all per-key state; every circuit returns to closed. */
 	reset(): void {
 		this.records.clear();

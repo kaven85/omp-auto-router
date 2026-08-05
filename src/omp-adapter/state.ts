@@ -25,6 +25,20 @@ export function collectProfileBudgets(config: RouterConfig): Record<string, Budg
 	return merged;
 }
 
+/** Warm-start circuit breaker and latency rolling means from persisted snapshots (best effort). */
+function restoreTrackers(stateStore: JsonStateStore, circuit: CircuitBreaker, latency: LatencyTracker): void {
+	const circuitSnapshot = stateStore.readJson<Record<string, { consecutiveFailures: number; openedAt: number; cooldownMs: number }>>("circuit.json");
+	if (circuitSnapshot) circuit.restore(circuitSnapshot);
+	const latencySnapshot = stateStore.readJson<Record<string, number>>("latency.json");
+	if (latencySnapshot) latency.restore(latencySnapshot);
+}
+
+/** Persist circuit breaker + latency snapshots so restarts keep warm-start data. */
+export function persistTrackers(state: AdapterState): void {
+	state.stateStore.writeJson("circuit.json", state.circuit.snapshot());
+	state.stateStore.writeJson("latency.json", state.latency.snapshot());
+}
+
 export interface AdapterState {
 	config: RouterConfig;
 	registry: ProfileRegistry;
@@ -97,11 +111,14 @@ export function createAdapterState(
 	};
 	const budgets = new BudgetTracker(usageStore, limitsStore);
 	budgets.mergeProfileLimits(collectProfileBudgets(config));
+	const circuit = new CircuitBreaker();
+	const latency = new LatencyTracker();
+	restoreTrackers(stateStore, circuit, latency);
 	return {
 		config,
 		registry: new ProfileRegistry(config, { cwd }),
-		circuit: new CircuitBreaker(),
-		latency: new LatencyTracker(),
+		circuit,
+		latency,
 		budgets,
 		decisions: new DecisionStore(),
 		eventLog: new EventLog(stateDir),

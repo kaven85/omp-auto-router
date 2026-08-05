@@ -57,6 +57,9 @@ export class MockExtensionApi implements OmpExtensionApi {
 	setThinkingLevel(level: string): void {
 		this.thinkingLevels.push(level);
 	}
+	getThinkingLevel(): string {
+		return this.thinkingLevels.at(-1) ?? "medium";
+	}
 	appendEntry(customType: string, data?: unknown): void {
 		this.entries.push({ customType, data });
 	}

@@ -144,3 +144,38 @@ describe("CircuitBreaker reset", () => {
 		expect(breaker.state("b/m", T0)).toBe("closed");
 	});
 });
+
+describe("CircuitBreaker snapshot/restore", () => {
+	test("an open circuit survives a snapshot round-trip", () => {
+		const breaker = new CircuitBreaker();
+		for (let i = 0; i < 3; i++) breaker.recordFailure("p/m", T0 + i);
+		const revived = new CircuitBreaker();
+		revived.restore(breaker.snapshot());
+		expect(revived.state("p/m", T0 + 30_000)).toBe("open");
+		expect(revived.state("p/m", T0 + 62_000)).toBe("half-open"); // openedAt = T0+2 (threshold-reaching failure)
+	});
+
+	test("restored backoff preserves the doubled cooldown", () => {
+		const breaker = new CircuitBreaker();
+		for (let i = 0; i < 3; i++) breaker.recordFailure("p/m", T0);
+		breaker.recordFailure("p/m", T0 + 60_000); // failed trial → 120s cooldown
+		const revived = new CircuitBreaker();
+		revived.restore(breaker.snapshot());
+		expect(revived.state("p/m", T0 + 60_000 + 119_999)).toBe("open");
+		expect(revived.state("p/m", T0 + 60_000 + 120_000)).toBe("half-open");
+	});
+
+	test("corrupt snapshot entries are skipped, valid ones survive", () => {
+		const breaker = new CircuitBreaker();
+		breaker.restore({
+			"bad/neg": { consecutiveFailures: -1, openedAt: 0, cooldownMs: 1_000 },
+			"bad/nan": { consecutiveFailures: Number.NaN, openedAt: 0, cooldownMs: 1_000 },
+			"bad/zero-cd": { consecutiveFailures: 3, openedAt: T0, cooldownMs: 0 },
+			"ok/m": { consecutiveFailures: 3, openedAt: T0, cooldownMs: 60_000 },
+		});
+		expect(breaker.state("bad/neg", T0)).toBe("closed");
+		expect(breaker.state("bad/nan", T0)).toBe("closed");
+		expect(breaker.state("bad/zero-cd", T0)).toBe("closed");
+		expect(breaker.state("ok/m", T0 + 30_000)).toBe("open");
+	});
+});

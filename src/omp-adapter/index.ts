@@ -16,7 +16,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import type { AdapterState } from "./state";
-import { createAdapterState, refreshModels, collectProfileBudgets } from "./state";
+import { createAdapterState, refreshModels, collectProfileBudgets, persistTrackers } from "./state";
 import { agentDir, loadAdapterConfigSync } from "./config";
 import { registerCommands } from "./commands";
 import { createStreamHandler } from "./router";
@@ -194,6 +194,12 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 		if (!current) return;
 		refreshModels(current, ctx);
 		current.lastDecision = undefined;
+	});
+
+	pi.on("session_shutdown", () => {
+		const current = stateRef.current;
+		if (!current) return;
+		persistTrackers(current);
 	});
 
 	// Reserved for Mode B (setModel-based routing) — inert in Mode A.
