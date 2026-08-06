@@ -118,6 +118,64 @@ describe("classifyComplexity — base tiers", () => {
 		expect(result.tier).toBe("standard");
 	});
 
+	test("mechanical dev ops land on simple despite code intent", () => {
+		// "提交代码并推送" — "代码" marks code intent (→ standard 1.5), but a
+		// commit+push is execute-don't-design: mechanical signal (simple 2)
+		// must win.
+		for (const prompt of ["提交代码并推送", "提交代码", "推送代码到远端", "commit and push the changes"]) {
+			const result = classifyComplexity(input({ prompt, intent: CODE_INTENT }));
+			expect(result.tier).toBe("simple");
+			expect(result.signals.mechanicalOp).toBe(true);
+			expect(result.reasons.join(" ")).toContain("mechanical op");
+		}
+	});
+
+	test("mechanical op with repair phrasing keeps standard", () => {
+		// A failed push needs diagnosis, not blind re-execution.
+		const result = classifyComplexity(
+			input({ prompt: "git push 报错了，帮我看看", intent: CODE_INTENT }),
+		);
+		expect(result.tier).toBe("standard");
+		expect(result.signals.mechanicalOp).toBe(false);
+	});
+
+	test("mechanical op bundled with multi-step phrasing keeps complex", () => {
+		const result = classifyComplexity(
+			input({ prompt: "重构这个模块然后 commit", intent: CODE_INTENT }),
+		);
+		expect(result.tier).toBe("complex");
+		expect(result.signals.mechanicalOp).toBe(false);
+	});
+
+	test("mechanical op quoting code keeps standard", () => {
+		const result = classifyComplexity(
+			input({ prompt: "commit this fix:\n```ts\nf()\n```", intent: CODE_INTENT }),
+		);
+		expect(result.tier).toBe("standard");
+		expect(result.signals.mechanicalOp).toBe(false);
+	});
+
+	test("merge across file paths still reaches standard via tie-break", () => {
+		// "merge" is a mechanical word, but the multi-file structural signal
+		// also fires (standard 2 vs simple 2 → tie resolves upward).
+		const result = classifyComplexity(
+			input({ prompt: "merge src/a.ts into lib/b.py", intent: CODE_INTENT }),
+		);
+		expect(result.tier).toBe("standard");
+	});
+
+	test("quant strategy phrasing reaches complex", () => {
+		for (const prompt of [
+			"帮我设计一个量化策略并回测",
+			"对这个行业做全市场筛选",
+			"run a backtest on the momentum strategy",
+		]) {
+			const result = classifyComplexity(input({ prompt, intent: CODE_INTENT }));
+			expect(result.tier).toBe("complex");
+			expect(result.signals.multiStep).toBe(true);
+		}
+	});
+
 	test("shortcut @fast overrides the code-intent escalation", () => {
 		const result = classifyComplexity(
 			input({ prompt: "实现一个冒泡排序", intent: CODE_INTENT, shortcut: shortcut("@fast") }),

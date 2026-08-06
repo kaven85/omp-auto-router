@@ -252,6 +252,8 @@ export interface ComplexitySignals {
 	/** Repair / debug phrasing that demands reasoning over existing code. */
 	repairDebug: boolean;
 	multiStep: boolean;
+	/** Mechanical operation (commit/push/deploy/…) needing execution, not design. */
+	mechanicalOp: boolean;
 	shortQa: boolean;
 	/** Sticky escalation from prior turns of the same task. */
 	stickyEscalation: boolean;

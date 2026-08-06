@@ -67,6 +67,17 @@ export const MULTI_STEP_KEYWORDS: readonly string[] = [
 	"蓝图",
 	"路线图",
 	"拆解",
+	// 炒股/量化：策略级任务需要多步推理，归入 complex
+	"回测",
+	"量化策略",
+	"策略开发",
+	"全市场筛选",
+	"全市场扫描",
+	"组合优化",
+	"组合管理",
+	"因子挖掘",
+	"选股引擎",
+	"产业链全景",
 ] as const;
 
 /**
@@ -97,6 +108,11 @@ export const MULTI_STEP_WORD_TERMS: readonly string[] = [
 	"modularize",
 	"modularise",
 	"restructure",
+	// quant/finance strategy-level terms
+	"backtest",
+	"backtesting",
+	"rebalance",
+	"rebalancing",
 ] as const;
 
 /** Whole-word regexes for MULTI_STEP_WORD_TERMS, precompiled once at module load. */
@@ -138,6 +154,65 @@ export const REPAIR_DEBUG_KEYWORDS: readonly string[] = [
 
 /** Estimated-token ceiling for the short-Q&A signal. */
 export const SHORT_QA_MAX_TOKENS = 200;
+
+/**
+ * Mechanical dev-operation terms matched as WHOLE WORDS (word-boundary
+ * regex), English only. These are execute-don't-design operations: the model
+ * runs known commands and composes at most a commit message, so they belong
+ * in `simple` (low thinking), never in `standard`. Whole-word matching keeps
+ * `push` from firing on a "design a push-notification system" prompt — that
+ * one also carries `design`/`方案`, which gates the signal off anyway.
+ */
+export const MECHANICAL_OP_WORD_TERMS: readonly string[] = [
+	"commit",
+	"commits",
+	"push",
+	"pull",
+	"merge",
+	"rebase",
+	"stash",
+	"cherry-pick",
+	"tag",
+	"deploy",
+	"install",
+	"uninstall",
+	"lint",
+	"format",
+] as const;
+
+/** Whole-word regexes for MECHANICAL_OP_WORD_TERMS, precompiled once at module load. */
+const MECHANICAL_OP_WORD_RES: readonly RegExp[] = MECHANICAL_OP_WORD_TERMS.map(
+	(term) => new RegExp(`\\b${term}\\b`),
+);
+
+/**
+ * Mechanical dev-operation phrases (Chinese + mixed), matched as substrings.
+ * Phrased specifically ("提交代码", not bare "提交") so "提交申请/提交表单"
+ * does not false-positive.
+ */
+export const MECHANICAL_OP_KEYWORDS: readonly string[] = [
+	"提交代码",
+	"提交并推送",
+	"推送代码",
+	"推代码",
+	"合并分支",
+	"合并请求",
+	"提个mr",
+	"提 mr",
+	"提mr",
+	"发布版本",
+	"发版",
+	"跑测试",
+	"跑一下测试",
+	"格式化代码",
+	"安装依赖",
+	"装依赖",
+	"升级版本号",
+	"改版本号",
+	"打个tag",
+	"打个 tag",
+	"打tag",
+] as const;
 
 const TIER_ORDER: readonly ComplexityTier[] = ["trivial", "simple", "standard", "complex"];
 
@@ -181,6 +256,19 @@ export function classifyComplexity(input: ClassifyComplexityInput): ComplexityRe
 		lower.includes(keyword.toLowerCase()),
 	);
 	const repairDebug = repairDebugMatches.length > 0;
+	const mechWordMatches = MECHANICAL_OP_WORD_RES.filter((re) => re.test(lower));
+	const mechPhraseMatches = MECHANICAL_OP_KEYWORDS.filter((keyword) =>
+		lower.includes(keyword.toLowerCase()),
+	);
+	// Mechanical ops (commit/push/deploy/…) are execute-don't-design: pin them
+	// to `simple`, but ONLY when nothing else demands reasoning — a push that
+	// failed (repairDebug), a release bundled with a redesign (multiStep), or
+	// a request quoting code/diffs must keep their higher tier.
+	const mechanicalOp =
+		(mechWordMatches.length > 0 || mechPhraseMatches.length > 0) &&
+		!multiStep &&
+		!repairDebug &&
+		codeSignals.length === 0;
 	const shortQa =
 		intent?.intent === "general" &&
 		estimatedTokens < SHORT_QA_MAX_TOKENS &&
@@ -233,6 +321,16 @@ export function classifyComplexity(input: ClassifyComplexityInput): ComplexityRe
 			reason: `multi-step (${[...multiStepMatches, ...multiStepWordMatches].join(", ")}) → complex`,
 		});
 	}
+	if (mechanicalOp) {
+		// Weight 2: beats the bare code-intent standard signal (1.5) and the
+		// short-context trivial signal (1), so "提交代码并推送" lands on simple
+		// even though "代码" marks it as code intent.
+		weighted.push({
+			tier: "simple",
+			weight: 2,
+			reason: `mechanical op (${[...mechWordMatches, ...mechPhraseMatches].join(", ")}) → simple`,
+		});
+	}
 	if (shortQa) {
 		weighted.push({
 			tier: "trivial",
@@ -280,6 +378,7 @@ export function classifyComplexity(input: ClassifyComplexityInput): ComplexityRe
 		codeSignals,
 		repairDebug,
 		multiStep,
+		mechanicalOp,
 		shortQa,
 		stickyEscalation,
 		hasImages,

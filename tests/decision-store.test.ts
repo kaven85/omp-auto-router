@@ -22,6 +22,7 @@ function makeDecision(decidedAt: number, profile = "default"): RoutingDecision {
 					codeSignals: [],
 					repairDebug: false,
 					multiStep: false,
+					mechanicalOp: false,
 					shortQa: false,
 					stickyEscalation: false,
 					hasImages: false,
