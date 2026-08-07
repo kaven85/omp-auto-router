@@ -12,6 +12,18 @@ import type { AdapterState } from "./state";
 
 /** How long a quota snapshot stays fresh before a background/request refresh re-fetches it. */
 export const QUOTA_REFRESH_MS = 30_000;
+
+/**
+ * Effective quota-refresh cadence: `OMP_AUTO_ROUTER_QUOTA_REFRESH_MS` env
+ * override, floored at 10s — provider usage reports update at minute
+ * granularity, so polling faster buys nothing and wastes auth-chain calls.
+ */
+export function quotaRefreshMs(): number {
+	const raw = process.env.OMP_AUTO_ROUTER_QUOTA_REFRESH_MS;
+	if (raw === undefined) return QUOTA_REFRESH_MS;
+	const parsed = Number(raw);
+	return Number.isFinite(parsed) && parsed >= 10_000 ? parsed : QUOTA_REFRESH_MS;
+}
 import type { OmpExtensionApi, OmpExtensionContext, OmpModel } from "./omp-api";
 import { redactSecrets } from "./redact";
 

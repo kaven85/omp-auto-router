@@ -10,7 +10,7 @@
  * `{currency, total_balance}` shape.
  */
 
-import type { RouteTarget } from "../core/types";
+import type { RouteTarget, ThinkingCap } from "../core/types";
 import type { AdapterState } from "./state";
 import type { OmpExtensionContext, OmpModel } from "./omp-api";
 
@@ -27,6 +27,8 @@ export interface ProviderDef {
 	balanceEndpoint?: string;
 	/** Parse the endpoint's JSON payload into a balance; undefined on shape mismatch. */
 	parseBalance?: (payload: unknown) => ProviderBalance | undefined;
+	/** Thinking levels accepted per model id; overridable per-target via `thinkingCap`. */
+	thinkingCaps?: Record<string, ThinkingCap>;
 }
 
 /** DeepSeek `{balance_infos: [{currency, total_balance}]}` shape. */
@@ -54,6 +56,10 @@ export const PROVIDER_REGISTRY: Record<string, ProviderDef> = {
 	deepseek: {
 		balanceEndpoint: "https://api.deepseek.com/user/balance",
 		parseBalance: (payload) => parseDeepSeekBalance(payload) ?? parseGenericBalance(payload),
+		// deepseek-v4-pro rejects `low`/`medium` effort; only high/max are valid.
+		thinkingCaps: {
+			"deepseek-v4-pro": { min: "high" },
+		},
 	},
 	"kimi-code": {
 		windowLabels: {
@@ -79,6 +85,16 @@ export function resolveBalanceEndpoint(provider: string, targets: readonly Route
 		if (target.provider === provider && target.balanceEndpoint !== undefined) return target.balanceEndpoint;
 	}
 	return PROVIDER_REGISTRY[provider]?.balanceEndpoint;
+}
+
+/**
+ * Resolve the thinking cap for a target: a target-level `thinkingCap` from
+ * the profile config wins over the registry default; unknown models are
+ * unbounded (host decides).
+ */
+export function resolveThinkingCap(target: RouteTarget): ThinkingCap | undefined {
+	if (target.thinkingCap !== undefined) return target.thinkingCap;
+	return PROVIDER_REGISTRY[target.provider]?.thinkingCaps?.[target.model];
 }
 
 /**

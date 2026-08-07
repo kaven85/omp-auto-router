@@ -19,8 +19,8 @@ import type { AdapterState } from "./state";
 import { createAdapterState, refreshModels, collectProfileBudgets, persistTrackers } from "./state";
 import { agentDir, loadAdapterConfigSync } from "./config";
 import { registerCommands } from "./commands";
-import { createStreamHandler } from "./router";
-import { createHostPorts, QUOTA_REFRESH_MS } from "./host-ports";
+import { createStreamHandler, renderWidget } from "./router";
+import { createHostPorts, quotaRefreshMs } from "./host-ports";
 import type { OmpExtensionApi, OmpExtensionContext, OmpProviderConfig } from "./omp-api";
 import { pickSafeEvent, redactSecrets } from "./redact";
 import type { RoutingDecision } from "../core/types";
@@ -37,31 +37,44 @@ let quotaRefreshTimer: unknown;
  * the auth chain when the cache just expired. Managed by the host ctx so the
  * timer dies with the session (omp requirement).
  */
+/**
+ * One background quota-refresh tick: re-fetch UVI snapshots into the cache,
+ * then push-render the widget so the display tracks the cache within one
+ * cadence instead of waiting for the next request. Exported for tests; the
+ * session interval below just schedules it.
+ */
+export async function refreshQuotaAndRender(
+	stateRef: { current: AdapterState | undefined },
+	pi: OmpExtensionApi,
+): Promise<void> {
+	const current = stateRef.current;
+	if (!current?.ctx) return;
+	const providers = new Set<string>();
+	for (const entry of current.registry.list()) {
+		const profile = current.registry.profile(entry.name);
+		if (!profile) continue;
+		for (const tier of Object.values(profile.tiers)) {
+			for (const target of tier.targets ?? []) providers.add(target.provider);
+		}
+	}
+	if (providers.size === 0) return;
+	const host = createHostPorts(pi, current.ctx, current);
+	try {
+		const snapshots = await host.fetchQuota([...providers]);
+		current.quotaCache = { at: Date.now(), data: snapshots };
+		renderWidget(current, host, current.lastDecision?.decision);
+	} catch {
+		// best-effort background refresh; request-path refresh retries
+	}
+}
+
 function startQuotaRefresh(stateRef: { current: AdapterState | undefined }, pi: OmpExtensionApi, ctx: OmpExtensionContext): void {
 	stopQuotaRefresh(ctx);
 	const state = stateRef.current;
 	if (!state?.uviEnabled) return;
 	quotaRefreshTimer = ctx.setInterval(() => {
-		const current = stateRef.current;
-		if (!current?.ctx) return;
-		const providers = new Set<string>();
-		for (const entry of current.registry.list()) {
-			const profile = current.registry.profile(entry.name);
-			if (!profile) continue;
-			for (const tier of Object.values(profile.tiers)) {
-				for (const target of tier.targets ?? []) providers.add(target.provider);
-			}
-		}
-		if (providers.size === 0) return;
-		void createHostPorts(pi, current.ctx, current)
-			.fetchQuota([...providers])
-			.then((snapshots) => {
-				current.quotaCache = { at: Date.now(), data: snapshots };
-			})
-			.catch(() => {
-				// best-effort background refresh; request-path refresh retries
-			});
-	}, QUOTA_REFRESH_MS);
+		void refreshQuotaAndRender(stateRef, pi);
+	}, quotaRefreshMs());
 }
 
 function stopQuotaRefresh(ctx: OmpExtensionContext): void {

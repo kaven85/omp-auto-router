@@ -9,7 +9,7 @@
 import type { QuotaSnapshot, QuotaWindow, RouteTarget } from "../core/types";
 import type { AdapterState } from "./state";
 import type { OmpAutocompleteItem, OmpExtensionApi, OmpExtensionContext } from "./omp-api";
-import { createHostPorts, QUOTA_REFRESH_MS } from "./host-ports";
+import { createHostPorts, quotaRefreshMs } from "./host-ports";
 import {
 	fetchProviderBalance,
 	PROVIDER_DISPLAY_ORDER,
@@ -588,7 +588,7 @@ async function runCommand(rawArgs: string, deps: CommandDeps, ctx: OmpExtensionC
 
 			const targets = getConfiguredTargets(state);
 			const providers = getConfiguredProviders(state);
-			const refreshQuota = providers.length > 0 && (state.quotaCache.data.length === 0 || Date.now() - state.quotaCache.at > QUOTA_REFRESH_MS);
+			const refreshQuota = providers.length > 0 && (state.quotaCache.data.length === 0 || Date.now() - state.quotaCache.at > quotaRefreshMs());
 			// Balance-capable providers: registry default (deepseek) plus any
 			// target-level `balanceEndpoint` override from the config.
 			const balanceProviders = providers.filter((provider) => resolveBalanceEndpoint(provider, targets) !== undefined);

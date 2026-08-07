@@ -22,9 +22,11 @@ mock.module("@oh-my-pi/pi-ai/error", () => ({
 	isProviderRetryableError: () => false,
 }));
 
-const { default: autoRouterExtension } = await import("../../src/omp-adapter/index");
+const { default: autoRouterExtension, refreshQuotaAndRender } = await import("../../src/omp-adapter/index");
+const { createAdapterState } = await import("../../src/omp-adapter/state");
 const { MockExtensionApi } = await import("./mock-omp");
 import type { OmpModel } from "../../src/omp-adapter/omp-api";
+import type { RouterConfig } from "../../src/core/types";
 
 const MODELS: OmpModel[] = [
 	{ provider: "anthropic", id: "sonnet", api: "anthropic-messages", reasoning: true, input: ["text"], contextWindow: 200_000, maxTokens: 16_384, cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } },
@@ -217,5 +219,62 @@ describe("extension entry (boot + ctx adoption)", () => {
 			for await (const _event of stream as AsyncGenerator<unknown>) { /* drain */ }
 			expect(streamCalls).toEqual([{ provider: "deepseek", model: "flash" }]);
 		});
+	});
+});
+
+describe("background quota refresh", () => {
+	test("refreshQuotaAndRender pushes fresh UVI to the widget without a request", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "ar-refresh-"));
+		try {
+			const config: RouterConfig = {
+				active: "main",
+				profiles: {
+					main: {
+						tiers: { standard: { targets: [{ provider: "anthropic", model: "sonnet" }] } },
+					},
+				},
+			};
+			const state = createAdapterState(config, dir, "/tmp/work");
+			const api = new MockExtensionApi();
+			const widgetCalls: string[][] = [];
+			let usedFraction = 0.25;
+			const ctx = api.makeCtx({
+				ui: {
+					hasUI: true,
+					notify: () => {},
+					setStatus: () => {},
+					setWidget: (_id, lines) => widgetCalls.push(lines),
+				},
+				modelRegistry: {
+					getApiKey: async () => "test-key",
+					authStorage: {
+						fetchUsageReports: async () => [
+							{
+								provider: "anthropic",
+								fetchedAt: Date.now(),
+								limits: [{ id: "5h", amount: { usedFraction }, window: { resetsAt: Date.now() + 3_600_000 } }],
+							},
+						],
+					},
+				},
+			});
+			state.ctx = ctx;
+
+			await refreshQuotaAndRender({ current: state }, api);
+			expect(state.quotaCache.data).toHaveLength(1);
+			expect(widgetCalls).toEqual([["uvi: anthropic 75% left"]]);
+
+			// Same data → no redundant widget render.
+			await refreshQuotaAndRender({ current: state }, api);
+			expect(widgetCalls).toHaveLength(1);
+
+			// Fresh data → the widget tracks the cache without any request.
+			usedFraction = 0.5;
+			await refreshQuotaAndRender({ current: state }, api);
+			expect(widgetCalls).toHaveLength(2);
+			expect(widgetCalls[1]).toEqual(["uvi: anthropic 50% left"]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

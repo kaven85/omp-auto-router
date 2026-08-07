@@ -22,6 +22,7 @@ import {
 	type ProfileConfig,
 	type RouteTarget,
 	type RouterConfig,
+	type ThinkingCap,
 	type TierConfig,
 } from "./types";
 
@@ -103,6 +104,22 @@ function parseRouteTarget(raw: unknown, path: string, errors: string[]): RouteTa
 	if (raw.balanceEndpoint !== undefined) {
 		if (typeof raw.balanceEndpoint === "string") target.balanceEndpoint = raw.balanceEndpoint;
 		else errors.push(`${path}.balanceEndpoint: expected a string`);
+	}
+	if (raw.thinkingCap !== undefined) {
+		if (!isRecord(raw.thinkingCap)) {
+			errors.push(`${path}.thinkingCap: expected {min?, max?} with thinking levels`);
+		} else {
+			const cap: ThinkingCap = {};
+			if (raw.thinkingCap.min !== undefined) {
+				if (oneOf(raw.thinkingCap.min, THINKING_LEVELS)) cap.min = raw.thinkingCap.min;
+				else errors.push(`${path}.thinkingCap.min: must be one of ${joinOptions(THINKING_LEVELS)}`);
+			}
+			if (raw.thinkingCap.max !== undefined) {
+				if (oneOf(raw.thinkingCap.max, THINKING_LEVELS)) cap.max = raw.thinkingCap.max;
+				else errors.push(`${path}.thinkingCap.max: must be one of ${joinOptions(THINKING_LEVELS)}`);
+			}
+			if (cap.min !== undefined || cap.max !== undefined) target.thinkingCap = cap;
+		}
 	}
 	return ok ? target : undefined;
 }

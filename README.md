@@ -20,10 +20,10 @@
 - **影子模式**：照记决策但按配置顺序路由，对比验证
 - **可解释**：`/auto-router explain` 输出完整推理链与链上候选评分；决策/用量 JSONL 落盘
 - **跨重启记忆**：熔断器状态与延迟滚动均值持久化（`circuit.json` / `latency.json`），重启后 warm-start
-- **环境开关**：`OMP_AUTO_ROUTER_UVI_HARD=1`（stressed UVI 直接排除）、`OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>`（分类置信度阈值，默认 0.45）
+- **环境开关**：`OMP_AUTO_ROUTER_UVI_HARD=1`（stressed UVI 直接排除）、`OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>`（分类置信度阈值，默认 0.45）、`OMP_AUTO_ROUTER_QUOTA_REFRESH_MS=<ms>`（配额刷新节奏，默认 30000，下限 10000）
 - **后台配额刷新**：session 启动后每 30s 后台刷新 UVI 配额（host managed timer），请求路径不再因缓存过期而阻塞
-- **仪表盘 widget**：决策后渲染 profile/预算/熔断/UVI 概览（host 无 setWidget 时自动降级）
-- **Provider registry**：provider 专属知识（Kimi 窗口标签、DeepSeek 余额端点）集中在 `provider-registry.ts`；target 级 `balanceEndpoint` 可覆盖默认端点
+- **仪表盘 widget**：决策后渲染 profile/预算/熔断/UVI 概览；后台刷新落地后立即重渲染，已过 resetsAt 的配额窗口按已重置显示，内容无变化时不重复渲染（host 无 setWidget 时自动降级）
+- **Provider registry**：provider 专属知识（Kimi 窗口标签、DeepSeek 余额端点、模型 thinking 强度范围）集中在 `provider-registry.ts`；target 级 `balanceEndpoint` / `thinkingCap` 可覆盖默认
 - **日志轮转**：事件日志超过 ~2MB 自动截断保留最新一半；预算 daily 桶保留 62 天（monthly 无限期）
 - **分析脚本**：`bun scripts/routing-stats.ts` 聚合事件日志（profile/tier/target 分布、failover、top 错误）
 
@@ -235,6 +235,7 @@ activate:                           # 按 cwd 前缀自动激活
 | `label` | string | 否 | 展示标签 |
 | `billing` | `subscription/per-token` | 否 | 缺省 `subscription`；影响预算桶与合成 UVI |
 | `balanceEndpoint` | string | 否 | 自定义余额 API（per-token 提供商）；覆盖 provider registry 内置默认（deepseek），响应接受 deepseek 或 `{currency, total_balance}` 形状，余额显示在 `/auto-router useage` |
+| `thinkingCap` | `{min?, max?}` | 否 | 该模型接受的 thinking 强度范围（含端点）；覆盖 provider registry 内置默认。tier 配置的 thinking 超出范围时会被钳制到范围内再下发，并记一条 `warn` 事件。例：`deepseek-v4-pro` 内置 `{min: high}`（只接受 high/max，拒绝 low/medium） |
 
 凭证走 omp 的 auth 链（`agent.db` 多凭证），**无需**在配置里写密钥。
 
@@ -460,7 +461,7 @@ tail ~/.omp/agent/auto-router/auto-router.events.jsonl
 
 - 虚拟模型元数据（contextWindow 等）为静态值，仅影响 `/model` 展示
 - 多会话（RPC）下 ctx 为进程级单例，按"单活动会话"假设运行
-- `OMP_AUTO_ROUTER_UVI_HARD` / `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD` 环境开关已支持；其余 `OMP_AUTO_ROUTER_*` 开关尚未实现
+- `OMP_AUTO_ROUTER_UVI_HARD` / `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD` / `OMP_AUTO_ROUTER_QUOTA_REFRESH_MS` 环境开关已支持；其余 `OMP_AUTO_ROUTER_*` 开关尚未实现
 - 插件包尚未走 omp 市场/`omp install` 安装形态（当前为目录引用）
 
 ## 开发

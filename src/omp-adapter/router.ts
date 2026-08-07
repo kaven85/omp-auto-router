@@ -17,12 +17,15 @@ import { isProviderRetryableError } from "@oh-my-pi/pi-ai/error";
 
 import { failoverStream, defaultIsRetryable, defaultIsSubstantive } from "../core/failover-engine";
 import type { FeedbackTracker } from "../core/feedback-tracker";
+import type { HostPorts } from "../core/host-ports";
 import { route } from "../core/pipeline";
+import { clampThinking } from "../core/thinking-cap";
 import type { QuotaSnapshot, RoutingDecision } from "../core/types";
 import type { AdapterState } from "./state";
 import { persistTrackers } from "./state";
-import { enrichCandidates, createHostPorts, QUOTA_REFRESH_MS } from "./host-ports";
+import { enrichCandidates, createHostPorts, quotaRefreshMs } from "./host-ports";
 import type { OmpExtensionApi, OmpExtensionContext } from "./omp-api";
+import { resolveThinkingCap } from "./provider-registry";
 import { redactSecrets } from "./redact";
 
 /** Transient exclusion window after a target fails within a failover chain. */
@@ -57,14 +60,18 @@ const TEST_FAILURE_ESCALATION_MS = 10 * 60_000;
 const TIER_LADDER = ["trivial", "simple", "standard", "complex"] as const;
 
 /**
- * Compose the dashboard widget: decision line plus live budget/circuit/UVI
- * snapshots. Rendered via the optional setWidget surface (no-op when the
- * host lacks it).
+ * Compose the dashboard widget: decision line (when a decision exists) plus
+ * live budget/circuit/UVI snapshots. UVI windows past their `resetsAt` are
+ * shown as freshly reset — the cached fetch would otherwise keep displaying
+ * the pre-reset usage until the next poll.
  */
-function buildWidgetLines(state: AdapterState, decision: RoutingDecision): string[] {
-	const lines: string[] = [
-		`${decision.profile} | tier=${decision.tier} | ${decision.target.provider}/${decision.target.model}${decision.thinking !== undefined ? ` | ${decision.thinking}` : ""}`,
-	];
+export function buildWidgetLines(state: AdapterState, decision?: RoutingDecision): string[] {
+	const lines: string[] = [];
+	if (decision !== undefined) {
+		lines.push(
+			`${decision.profile} | tier=${decision.tier} | ${decision.target.provider}/${decision.target.model}${decision.thinking !== undefined ? ` | ${decision.thinking}` : ""}`,
+		);
+	}
 	const budgetBits: string[] = [];
 	for (const [provider, limit] of Object.entries(state.budgets.limits())) {
 		const bucket = limit.monthly ? state.budgets.usage(provider).monthly : state.budgets.usage(provider).daily;
@@ -78,13 +85,41 @@ function buildWidgetLines(state: AdapterState, decision: RoutingDecision): strin
 		.map(([key, rec]) => `${key} (${rec.consecutiveFailures}x)`);
 	if (openCircuits.length > 0) lines.push(`circuit open: ${openCircuits.join(" · ")}`);
 	if (state.uviEnabled && state.quotaCache.data.length > 0) {
+		const nowMs = Date.now();
 		const uviBits = state.quotaCache.data.map((snapshot) => {
-			const worst = Math.max(0, ...snapshot.windows.map((window) => window.usedFraction));
+			const worst = Math.max(
+				0,
+				...snapshot.windows.map((window) =>
+					window.resetsAt !== undefined && window.resetsAt <= nowMs ? 0 : window.usedFraction,
+				),
+			);
 			return `${snapshot.provider} ${(100 - worst * 100).toFixed(0)}% left`;
 		});
 		lines.push(`uvi: ${uviBits.join(" · ")}`);
 	}
 	return lines;
+}
+
+/** Last rendered widget payload; identical re-renders are suppressed. */
+let lastWidgetPayload: string | undefined;
+
+/**
+ * Render the dashboard widget, skipping no-op updates. Shared by the request
+ * path (new decision) and the background quota refresh (fresh UVI data) so
+ * the widget reflects cache changes within one refresh cadence without
+ * re-rendering when nothing changed.
+ */
+export function renderWidget(
+	state: AdapterState,
+	host: Pick<HostPorts, "setWidget">,
+	decision?: RoutingDecision,
+): void {
+	const lines = buildWidgetLines(state, decision);
+	if (lines.length === 0) return;
+	const payload = lines.join("\n");
+	if (payload === lastWidgetPayload) return;
+	lastWidgetPayload = payload;
+	host.setWidget(lines);
 }
 
 export interface StreamArgs {
@@ -276,7 +311,7 @@ export function createStreamHandler(
 		if (state.uviEnabled && state.ctx) {
 			const providers = [...new Set(allTargets.map((t) => t.provider))];
 			const nowMs = Date.now();
-			if (nowMs - state.quotaCache.at >= QUOTA_REFRESH_MS) {
+			if (nowMs - state.quotaCache.at >= quotaRefreshMs()) {
 				const snapshots = await host.fetchQuota(providers);
 				state.quotaCache = { at: nowMs, data: snapshots };
 			}
@@ -336,15 +371,39 @@ export function createStreamHandler(
 			decision.target = finalOrder[0] ?? decision.target;
 		}
 
+		// No eligible candidate: failoverStream would throw a bare programmer
+		// error, so fail with an actionable message instead. Exclusion reasons
+		// from the pipeline (unhealthy / cooldown / circuit / UVI / capability)
+		// explain what the user can fix.
+		if (finalOrder.length === 0) {
+			state.decisions.record(decision);
+			state.lastDecision = { at: now.getTime(), decision, cleanPrompt };
+			pi.appendEntry("com.omp.auto-router.decision", decision);
+			state.eventLog.append({ type: "decision", at: now.getTime(), profile: decision.profile, tier: decision.tier, target: decision.target });
+			const exclusions = decision.reasoning.filter((line) => line.startsWith("excluded "));
+			const detail = exclusions.length > 0 ? ` — ${exclusions.join("; ")}` : "";
+			yield* failWith(
+				`auto-router: no eligible candidates for profile "${profileName}" tier=${decision.tier}${detail}`,
+			);
+			return;
+		}
+
 		// Record + persist the decision for /auto-router explain.
 		state.decisions.record(decision);
 		state.lastDecision = { at: now.getTime(), decision, cleanPrompt };
 		pi.appendEntry("com.omp.auto-router.decision", decision);
-		state.eventLog.append({ type: "decision", at: now.getTime(), profile: decision.profile, tier: decision.tier, target: decision.target });
+		state.eventLog.append({
+			type: "decision",
+			at: now.getTime(),
+			profile: decision.profile,
+			tier: decision.tier,
+			target: decision.target,
+			...(decision.thinking !== undefined ? { thinking: decision.thinking } : {}),
+		});
 		host.setStatus(
 			`auto-router ${decision.profile} | tier=${decision.tier} (${decision.confidence.toFixed(2)}) | ${decision.target.provider}/${decision.target.model}${decision.thinking !== undefined ? ` | thinking=${decision.thinking}` : ""}`,
 		);
-		host.setWidget(buildWidgetLines(state, decision));
+		renderWidget(state, host, decision);
 
 		// Strip the router tokens before the model ever sees the prompt.
 		rewriteLastUserText(args.context, cleanPrompt);
@@ -417,15 +476,33 @@ export function createStreamHandler(
 		// delegate stream starts, restore the session's previous level when the
 		// stream ends (including abort/early-return of the generator). Skipped
 		// in shadow mode, which must not mutate session behavior.
+		//
+		// The configured level is clamped into the target model's supported
+		// range (registry default, overridable per-target) so a misconfigured
+		// tier can never hand the provider an effort it rejects — e.g.
+		// deepseek-v4-pro accepts only high/max, never low/medium.
+		const thinkingCap = resolveThinkingCap(decision.target);
+		const appliedThinking =
+			decision.thinking !== undefined ? clampThinking(decision.thinking, thinkingCap) : undefined;
+		if (decision.thinking !== undefined && appliedThinking !== decision.thinking) {
+			state.eventLog.append({
+				type: "warn",
+				at: Date.now(),
+				what: "thinking-clamped",
+				target: `${decision.target.provider}/${decision.target.model}`,
+				from: decision.thinking,
+				to: appliedThinking,
+			});
+		}
 		const canSteerThinking =
-			decision.thinking !== undefined &&
+			appliedThinking !== undefined &&
 			!state.shadowEnabled &&
 			typeof pi.setThinkingLevel === "function";
 		const priorThinking =
 			canSteerThinking && typeof pi.getThinkingLevel === "function" ? pi.getThinkingLevel() : undefined;
-		if (canSteerThinking && decision.thinking !== undefined) {
+		if (canSteerThinking && appliedThinking !== undefined) {
 			try {
-				pi.setThinkingLevel(decision.thinking);
+				pi.setThinkingLevel(appliedThinking);
 			} catch (error) {
 				state.eventLog.append({
 					type: "error",

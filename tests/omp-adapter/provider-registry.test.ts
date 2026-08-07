@@ -4,6 +4,7 @@ import {
 	fetchProviderBalance,
 	PROVIDER_REGISTRY,
 	resolveBalanceEndpoint,
+	resolveThinkingCap,
 } from "../../src/omp-adapter/provider-registry";
 import type { RouteTarget } from "../../src/core/types";
 
@@ -31,6 +32,25 @@ describe("provider registry", () => {
 
 	test("providers without balance support resolve to undefined", () => {
 		expect(resolveBalanceEndpoint("anthropic", [target("anthropic")])).toBeUndefined();
+	});
+
+	test("registry default thinking cap resolves for known models", () => {
+		expect(resolveThinkingCap({ provider: "deepseek", model: "deepseek-v4-pro" })).toEqual({ min: "high" });
+	});
+
+	test("target-level thinkingCap overrides the registry default", () => {
+		expect(
+			resolveThinkingCap({
+				provider: "deepseek",
+				model: "deepseek-v4-pro",
+				thinkingCap: { min: "medium", max: "max" },
+			}),
+		).toEqual({ min: "medium", max: "max" });
+	});
+
+	test("unknown models resolve to no cap", () => {
+		expect(resolveThinkingCap({ provider: "deepseek", model: "deepseek-v4-flash" })).toBeUndefined();
+		expect(resolveThinkingCap({ provider: "anthropic", model: "claude-opus" })).toBeUndefined();
 	});
 
 	test("deepseek parser accepts both deepseek and generic shapes", () => {

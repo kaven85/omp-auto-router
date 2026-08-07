@@ -24,7 +24,7 @@ mock.module("@oh-my-pi/pi-ai/error", () => ({
 	isProviderRetryableError: (error: unknown) => retryableBehavior(error),
 }));
 
-const { createStreamHandler } = await import("../../src/omp-adapter/router");
+const { createStreamHandler, buildWidgetLines, renderWidget } = await import("../../src/omp-adapter/router");
 const { createAdapterState } = await import("../../src/omp-adapter/state");
 const { refreshModels } = await import("../../src/omp-adapter/state");
 const { CircuitBreaker } = await import("../../src/core/circuit-breaker");
@@ -138,6 +138,64 @@ describe("adapter router (Mode A)", () => {
 		for await (const _event of handler) { /* drain */ }
 		// complex tier config thinking=high; mock's pre-existing level is "medium".
 		expect(api.thinkingLevels).toEqual(["high", "medium"]);
+	});
+
+	test("configured thinking is clamped into the target model's supported range", async () => {
+		// deepseek-v4-pro accepts only high/max; a tier configured at "low" must
+		// steer the host with "high", never "low".
+		const api = new MockExtensionApi();
+		api.models = [
+			...MODELS,
+			{ provider: "deepseek", id: "deepseek-v4-pro", api: "openai-completions", reasoning: true, input: ["text"], contextWindow: 128_000, maxTokens: 8_192, cost: { input: 0.27, output: 1.1, cacheRead: 0.07, cacheWrite: 0.27 } },
+		];
+		const config: RouterConfig = {
+			active: "capped",
+			profiles: {
+				capped: {
+					defaultTier: "complex",
+					tiers: {
+						complex: {
+							thinking: "low",
+							targets: [{ provider: "deepseek", model: "deepseek-v4-pro", billing: "per-token" }],
+						},
+					},
+				},
+			},
+		};
+		const dir = mkdtempSync(join(tmpdir(), "ar-clamp-"));
+		const state = createAdapterState(config, dir, "/tmp/work");
+		state.ctx = api.makeCtx();
+		refreshModels(state, state.ctx);
+		streamCalls.length = 0;
+		streamBehavior = async function* () {
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		retryableBehavior = () => true;
+		try {
+			const handler = createStreamHandler(state, api, {
+				model: { provider: "auto-router", id: "capped" },
+				context: contextWithPrompt("@reasoning prove primes"),
+				options: {},
+			});
+			for await (const _event of handler) { /* drain */ }
+			// "low" clamped up to "high" (registry cap), then prior level restored.
+			expect(api.thinkingLevels[0]).toBe("high");
+			expect(api.thinkingLevels[0]).not.toBe("low");
+			// A clamp warning is recorded for diagnosis.
+			const events = state.eventLog.readAll();
+			expect(
+				events.some(
+					(e) =>
+						e.type === "warn" &&
+						e.what === "thinking-clamped" &&
+						e.target === "deepseek/deepseek-v4-pro" &&
+						e.from === "low" &&
+						e.to === "high",
+				),
+			).toBe(true);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	test("thinking level is not touched in shadow mode", async () => {
@@ -691,6 +749,126 @@ describe("adapter router (Mode A)", () => {
 			{ provider: "deepseek", model: "flash", billing: "per-token" },
 		]);
 		expect(streamCalls[0]).toEqual({ provider: "anthropic", model: "sonnet" });
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("no eligible candidates yields actionable error instead of throwing", async () => {
+		const { api, state, ctx, dir } = setup();
+		// Open the breaker for every complex-tier target so @reasoning has
+		// nothing to fail over to.
+		state.circuit = new CircuitBreaker({ failureThreshold: 1 });
+		state.circuit.recordFailure("anthropic/opus", Date.now());
+		state.circuit.recordFailure("google/gemini", Date.now());
+		const context = contextWithPrompt("@reasoning hard problem");
+		state.ctx = ctx;
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context,
+			options: {},
+		});
+		const events: Array<{ type: string; [k: string]: unknown }> = [];
+		for await (const event of handler) events.push(event);
+		expect(events).toHaveLength(1);
+		expect(events[0]!.type).toBe("error");
+		const text = errorText(events[0]!);
+		expect(text).toContain("no eligible candidates");
+		expect(text).toContain("circuit breaker open");
+		// Nothing delegated downstream; decision still recorded for explain.
+		expect(streamCalls).toEqual([]);
+		expect(state.lastDecision?.decision.orderedCandidates).toEqual([]);
+		expect(api.entries.some((e) => e.customType === "com.omp.auto-router.decision")).toBe(true);
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("shadow mode with no healthy targets yields actionable error instead of throwing", async () => {
+		const { api, state, dir } = setup();
+		// Empty host registry → host.isHealthy(t) false for every target.
+		api.models = [];
+		const ctx = api.makeCtx();
+		state.shadowEnabled = true;
+		// Skip the async discovery grace loop — mock ctx.setTimeout never fires.
+		state.modelsReady = true;
+		const context = contextWithPrompt("@swe implement a function");
+		state.ctx = ctx;
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context,
+			options: {},
+		});
+		const events: Array<{ type: string; [k: string]: unknown }> = [];
+		for await (const event of handler) events.push(event);
+		expect(events).toHaveLength(1);
+		expect(events[0]!.type).toBe("error");
+		expect(errorText(events[0]!)).toContain("no eligible candidates");
+		expect(streamCalls).toEqual([]);
+		rmSync(dir, { recursive: true, force: true });
+	});
+});
+
+/** Narrow an adapter `error` event to its assistant text payload. */
+function errorText(event: { type: string; [k: string]: unknown }): string {
+	const err = event.error;
+	if (err === null || typeof err !== "object" || !("content" in err)) return "";
+	const content = err.content;
+	if (!Array.isArray(content)) return "";
+	const first = content[0];
+	if (first === null || typeof first !== "object" || !("text" in first)) return "";
+	return typeof first.text === "string" ? first.text : "";
+}
+
+describe("widget rendering", () => {
+	test("uvi window past resetsAt renders as freshly reset", () => {
+		const { state, dir } = setup();
+		state.quotaCache = {
+			at: Date.now(),
+			data: [
+				{
+					provider: "roll-a",
+					fetchedAt: Date.now() - 60_000,
+					windows: [{ id: "5h", usedFraction: 0.8, resetsAt: Date.now() - 1_000 }],
+				},
+				{
+					provider: "roll-b",
+					fetchedAt: Date.now() - 60_000,
+					windows: [{ id: "5h", usedFraction: 0.8, resetsAt: Date.now() + 3_600_000 }],
+				},
+			],
+		};
+		const lines = buildWidgetLines(state);
+		expect(lines).toEqual(["uvi: roll-a 100% left · roll-b 20% left"]);
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("without a decision the widget shows status lines only", () => {
+		const { state, dir } = setup();
+		state.quotaCache = {
+			at: Date.now(),
+			data: [{ provider: "solo-p", fetchedAt: Date.now(), windows: [{ id: "7d", usedFraction: 0.5 }] }],
+		};
+		const lines = buildWidgetLines(state);
+		expect(lines).toEqual(["uvi: solo-p 50% left"]);
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("renderWidget suppresses identical re-renders", () => {
+		const { state, dir } = setup();
+		state.quotaCache = {
+			at: Date.now(),
+			data: [{ provider: "dedupe-p", fetchedAt: Date.now(), windows: [{ id: "7d", usedFraction: 0.25 }] }],
+		};
+		const calls: string[][] = [];
+		const host = { setWidget: (lines: string[]) => calls.push(lines) };
+		renderWidget(state, host);
+		renderWidget(state, host);
+		expect(calls).toHaveLength(1);
+		// Fresh data changes the payload → renders again.
+		state.quotaCache = {
+			at: Date.now(),
+			data: [{ provider: "dedupe-p", fetchedAt: Date.now(), windows: [{ id: "7d", usedFraction: 0.5 }] }],
+		};
+		renderWidget(state, host);
+		expect(calls).toHaveLength(2);
+		expect(calls[1]).toEqual(["uvi: dedupe-p 50% left"]);
 		rmSync(dir, { recursive: true, force: true });
 	});
 });

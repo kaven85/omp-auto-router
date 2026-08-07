@@ -16,6 +16,14 @@ export type ComplexityTier = (typeof COMPLEXITY_TIERS)[number];
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
+/** Supported thinking range of a model, inclusive. Absent bound = unbounded. */
+export interface ThinkingCap {
+	/** Lowest supported thinking level. */
+	min?: ThinkingLevel;
+	/** Highest supported thinking level. */
+	max?: ThinkingLevel;
+}
+
 export type Billing = "subscription" | "per-token";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -31,6 +39,8 @@ export interface RouteTarget {
 	billing?: Billing;
 	/** Optional custom balance API URL for per-token providers. */
 	balanceEndpoint?: string;
+	/** Thinking levels this model accepts; overrides the provider registry default. */
+	thinkingCap?: ThinkingCap;
 }
 
 export interface TierConfig {
@@ -360,6 +370,7 @@ export interface RouterEvent {
 		| "failover"
 		| "settled"
 		| "error"
+		| "warn"
 		| "budget-warning"
 		| "budget-blocked"
 		| "uvi"

@@ -172,6 +172,43 @@ profiles:
 		expect(errors.some((e) => e.includes("targets[0].billing"))).toBe(true);
 	});
 
+	test("target thinkingCap parses min/max", () => {
+		const yaml = `
+profiles:
+  premium:
+    tiers:
+      complex:
+        targets:
+          - provider: deepseek
+            model: deepseek-v4-pro
+            thinkingCap: { min: high }
+          - provider: deepseek
+            model: deepseek-v4-flash
+            thinkingCap: { min: low, max: max }
+`;
+		const { config, errors } = parseRouterConfig(yaml);
+		expect(errors).toEqual([]);
+		const targets = config!.profiles.premium!.tiers.complex!.targets;
+		expect(targets[0]!.thinkingCap).toEqual({ min: "high" });
+		expect(targets[1]!.thinkingCap).toEqual({ min: "low", max: "max" });
+	});
+
+	test("target thinkingCap rejects invalid levels with dotted path", () => {
+		const yaml = `
+profiles:
+  premium:
+    tiers:
+      complex:
+        targets:
+          - provider: deepseek
+            model: deepseek-v4-flash
+            thinkingCap: { min: low, max: bogus }
+`;
+		const { config, errors } = parseRouterConfig(yaml);
+		expect(config).toBeUndefined();
+		expect(errors.some((e) => e.includes("targets[0].thinkingCap.max"))).toBe(true);
+	});
+
 	test("budget amount must be a positive number", () => {
 		const yaml = `
 profiles:

@@ -23,7 +23,7 @@ Ported from the design ideas of [pi-auto-router](https://github.com/danialranjha
 - **Env switches**: `OMP_AUTO_ROUTER_UVI_HARD=1` (exclude stressed-UVI providers), `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>` (classifier confidence gate, default 0.45)
 - **Background quota refresh**: UVI quota snapshots refresh every 30s in the background (host-managed timer), so requests never block on an expired cache
 - **Dashboard widget**: after each decision a profile/budget/circuit/UVI overview is rendered via `setWidget` (degrades silently when the host lacks it)
-- **Provider registry**: provider-specific knowledge (Kimi window labels, DeepSeek balance endpoint) lives in `provider-registry.ts`; a target-level `balanceEndpoint` overrides the default
+- **Provider registry**: provider-specific knowledge (Kimi window labels, DeepSeek balance endpoint, per-model thinking ranges) lives in `provider-registry.ts`; target-level `balanceEndpoint` / `thinkingCap` override the defaults
 - **Log rotation**: the event log truncates to its newest half past ~2 MB; daily budget buckets are kept for 62 days (monthly rollups indefinitely)
 - **Analytics script**: `bun scripts/routing-stats.ts` aggregates the event log (decisions per profile/tier/target, failovers, top errors)
 
@@ -235,6 +235,7 @@ activate:                           # auto-activate by cwd prefix
 | `label` | string | no | display label |
 | `billing` | `subscription/per-token` | no | default `subscription`; affects budget bucket and synthetic UVI |
 | `balanceEndpoint` | string | no | custom balance API (per-token providers) |
+| `thinkingCap` | `{min?, max?}` | no | thinking range (inclusive) the model accepts; overrides the provider-registry default. A tier thinking outside the range is clamped into range before steering, recorded as a `warn` event. E.g. `deepseek-v4-pro` defaults to `{min: high}` (accepts high/max only, rejects low/medium) |
 
 Credentials come from omp's auth chain (`agent.db` multi-credential) — **no keys** in the config file.
 

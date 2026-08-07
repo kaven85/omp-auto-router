@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.1] - 2026-08-07
+
+### Added
+
+- `OMP_AUTO_ROUTER_QUOTA_REFRESH_MS` env override for the background quota-refresh cadence (default 30000, floored at 10000 — provider usage reports update at minute granularity, so polling faster wastes auth-chain calls).
+- Background quota refresh now pushes fresh UVI data to the dashboard widget immediately after landing, instead of waiting for the next request.
+- Dashboard widget: UVI windows past their `resetsAt` are shown as freshly reset, and identical re-renders are suppressed.
+- Thinking-cap clamping: each target model declares the thinking range it accepts (registry default, e.g. `deepseek-v4-pro` → `{min: high}`; overridable per-target via `thinkingCap: {min, max}`). A tier's configured thinking outside that range is clamped into range before the host is steered, and the clamp is recorded as a `warn` event with the original and applied levels. The `decision` event now also records the applied thinking level.
+
+### Fixed
+
+- Failover with no eligible candidates now raises an actionable error listing the exclusion reasons (unhealthy / cooldown / circuit / UVI / capability) instead of throwing a bare programmer error.
+
 ## [0.3.0] - 2026-08-05
 
 ### Added
