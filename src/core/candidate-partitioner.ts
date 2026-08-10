@@ -17,11 +17,16 @@
  * normally removes open circuits upstream.)
  *
  * Ordering: buckets concatenate as promoted → normal → demoted. Within a
- * bucket, candidates sort by rolling-average latency ascending; candidates
- * without latency history sort last. Ties (unknown or equal latency) break by
- * estimated per-request cost ascending when BOTH candidates expose cost —
- * using a flat 1M-input + 1M-output-token estimate for comparison only.
- * Anything still tied keeps its input order (stable sort).
+ * bucket, subscription-billed candidates outrank per-token ones — quota
+ * already paid for is spent before metered balance. A per-token candidate
+ * only jumps ahead of a subscription candidate whose rolling latency has
+ * crossed an absolute usability bar (see SUBSCRIPTION_LATENCY_MAX_MS);
+ * relative speed is ignored because total stream duration confounds model
+ * speed with response length. Among same-billing candidates the sort is rolling-average latency ascending; candidates without latency
+ * history sort last. Ties (unknown or equal latency) break by estimated
+ * per-request cost ascending when BOTH candidates expose cost — using a flat
+ * 1M-input + 1M-output-token estimate for comparison only. Anything still
+ * tied keeps its input order (stable sort).
  */
 
 import type { BudgetAudit, CandidateInfo, UviResult } from "./types";
@@ -125,8 +130,23 @@ function bucketOf(
 }
 
 /**
- * Comparator: latency ascending (no-history last), then estimated cost
- * ascending when both sides expose cost, else 0 (stable — input order kept).
+ * Subscription→per-token override: a per-token candidate may outrank a
+ * subscription candidate only when the subscription rolling latency exceeds
+ * an absolute "unusable" bar. Latency here is total stream duration, which
+ * grows with response length as much as with model speed — a frontier
+ * subscription model doing real work is routinely 10× "slower" than a
+ * flash-class metered model while serving perfectly well. A ratio-based
+ * comparison would therefore dethrone subscription models almost
+ * permanently; only an absolute usability bar matches "switch when the
+ * degradation actually hurts normal use".
+ */
+export const SUBSCRIPTION_LATENCY_MAX_MS = 60_000;
+
+/**
+ * Comparator: subscription billing first (per-token only ahead when the
+ * subscription latency is significantly degraded), then latency ascending
+ * (no-history last), then estimated cost ascending when both sides expose
+ * cost, else 0 (stable — input order kept).
  */
 function compareCandidates(
 	input: PartitionInput,
@@ -137,6 +157,24 @@ function compareCandidates(
 		const rawB = input.latency[b.key];
 		const latencyA = rawA !== undefined && Number.isFinite(rawA) ? rawA : undefined;
 		const latencyB = rawB !== undefined && Number.isFinite(rawB) ? rawB : undefined;
+
+		const billingA = a.target.billing ?? "subscription";
+		const billingB = b.target.billing ?? "subscription";
+		if (billingA !== billingB) {
+			const subLatency = billingA === "subscription" ? latencyA : latencyB;
+			const tokenLatency = billingA === "subscription" ? latencyB : latencyA;
+			// Per-token jumps ahead only when the subscription rolling latency
+			// is past the absolute usability bar AND worse than the metered
+			// candidate; missing history is not evidence of degradation.
+			const degraded =
+				subLatency !== undefined &&
+				tokenLatency !== undefined &&
+				subLatency >= SUBSCRIPTION_LATENCY_MAX_MS &&
+				subLatency > tokenLatency;
+			if (!degraded) return billingA === "subscription" ? -1 : 1;
+			return billingA === "per-token" ? -1 : 1;
+		}
+
 		if (latencyA !== undefined && latencyB !== undefined) {
 			if (latencyA !== latencyB) return latencyA - latencyB;
 		} else if (latencyA !== undefined) {

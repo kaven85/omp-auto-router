@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## [0.4.0] - 2026-08-10
+
+### Added
+
+- Subscription-first candidate ordering: within a partition bucket, subscription-billed candidates now outrank per-token ones, so paid quota is spent before metered balance. A per-token candidate only takes the lead when the subscription candidate's rolling latency crosses an absolute usability bar (`SUBSCRIPTION_LATENCY_MAX_MS`, 60s) and is worse than the metered candidate. Relative latency is deliberately ignored across billing groups: the tracked latency is total stream duration, which confounds model speed with response length, so ratio comparisons would dethrone slower-but-healthy subscription models almost permanently.
 
 ### Fixed
 

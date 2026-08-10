@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { partitionCandidates, type PartitionInput } from "../src/core/candidate-partitioner";
+import { partitionCandidates, SUBSCRIPTION_LATENCY_MAX_MS, type PartitionInput } from "../src/core/candidate-partitioner";
 import { CircuitBreaker } from "../src/core/circuit-breaker";
 import type {
 	BudgetAudit,
@@ -255,5 +255,71 @@ describe("partitionCandidates ordering within buckets", () => {
 		expect(keys(buckets.promoted)).toEqual(["surplus/fast", "surplus/slow"]);
 		// Bucket precedence beats raw latency: promoted slow still outranks demoted fast.
 		expect(keys(ordered)).toEqual(["surplus/fast", "surplus/slow", "stressed/fast"]);
+	});
+});
+
+describe("partitionCandidates billing preference", () => {
+	const perToken = (provider: string, model = "m") =>
+		candidate(provider, model, { target: { provider, model, billing: "per-token" } });
+
+	test("subscription without history outranks per-token with history", () => {
+		// The reported case: subscription candidate has never served a request,
+		// per-token candidate has a latency sample. No evidence of degradation
+		// → subscription (default billing) keeps priority.
+		const sub = candidate("sub", "m");
+		const metered = perToken("metered");
+		const { ordered } = partitionCandidates(
+			[metered, sub],
+			input({ latency: { "metered/m": 100 } }),
+		);
+		expect(keys(ordered)).toEqual(["sub/m", "metered/m"]);
+	});
+
+	test("subscription keeps priority even when many times slower than per-token", () => {
+		// Real-world case: subscription frontier model averaging 22.8s total
+		// stream time vs metered flash model at 1.7s. Relative speed is
+		// ignored — total duration confounds model speed with response length.
+		const sub = candidate("sub", "m");
+		const metered = perToken("metered");
+		const { ordered } = partitionCandidates(
+			[metered, sub],
+			input({ latency: { "sub/m": 22_787, "metered/m": 1_675 } }),
+		);
+		expect(keys(ordered)).toEqual(["sub/m", "metered/m"]);
+	});
+
+	test("per-token jumps ahead only when subscription latency crosses the usability bar", () => {
+		const sub = candidate("sub", "m");
+		const metered = perToken("metered");
+		const { ordered } = partitionCandidates(
+			[sub, metered],
+			input({ latency: { "sub/m": SUBSCRIPTION_LATENCY_MAX_MS + 1_000, "metered/m": 1_000 } }),
+		);
+		expect(keys(ordered)).toEqual(["metered/m", "sub/m"]);
+	});
+
+	test("subscription past the bar still beats a per-token candidate that is even slower", () => {
+		const sub = candidate("sub", "m");
+		const metered = perToken("metered");
+		const { ordered } = partitionCandidates(
+			[metered, sub],
+			input({
+				latency: {
+					"sub/m": SUBSCRIPTION_LATENCY_MAX_MS + 1_000,
+					"metered/m": SUBSCRIPTION_LATENCY_MAX_MS + 5_000,
+				},
+			}),
+		);
+		expect(keys(ordered)).toEqual(["sub/m", "metered/m"]);
+	});
+
+	test("same billing group still sorts by latency", () => {
+		const slowMetered = perToken("slow");
+		const fastMetered = perToken("fast");
+		const { ordered } = partitionCandidates(
+			[slowMetered, fastMetered],
+			input({ latency: { "slow/m": 900, "fast/m": 100 } }),
+		);
+		expect(keys(ordered)).toEqual(["fast/m", "slow/m"]);
 	});
 });
