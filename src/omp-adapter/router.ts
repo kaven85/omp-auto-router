@@ -57,6 +57,15 @@ const RATING_DEMOTE_BELOW = 0.4;
 /** How long a failed test/build command keeps the tier floor raised. */
 const TEST_FAILURE_ESCALATION_MS = 10 * 60_000;
 
+/**
+ * How long a request waits for `session_start` to land on the state before
+ * failing. Requests can reach the virtual provider before the boot event
+ * (early prompts, subagent spawn races, extension hot-reload mid-session);
+ * a bounded wait mirrors `waitForConfiguredModel` so a slow boot doesn't
+ * fail the first request.
+ */
+const CTX_READY_WAIT_MS = 5_000;
+
 const TIER_LADDER = ["trivial", "simple", "standard", "complex"] as const;
 
 /**
@@ -212,6 +221,31 @@ async function waitForConfiguredModel(
 	}
 }
 
+/**
+ * Wait for the host's `session_start` to land on this state before routing.
+ * Polls `state.ctx` (bounded by `timeoutMs`, abortable) instead of failing
+ * immediately — the first request of a session can stream before the boot
+ * event handler runs. Returns undefined when the grace period elapses or the
+ * request is aborted.
+ */
+export async function waitForSessionContext(
+	state: AdapterState,
+	signal?: AbortSignal,
+	timeoutMs: number = CTX_READY_WAIT_MS,
+): Promise<OmpExtensionContext | undefined> {
+	if (state.ctx) return state.ctx;
+	const deadline = Date.now() + timeoutMs;
+	while (!signal?.aborted) {
+		const remaining = deadline - Date.now();
+		if (remaining <= 0) return undefined;
+		await new Promise<void>((resolve) => {
+			setTimeout(resolve, Math.min(remaining, 50));
+		});
+		if (state.ctx) return state.ctx;
+	}
+	return undefined;
+}
+
 /** Read optional tuning flags from the environment; all are documented in README.md. */
 function readEnvFlag(name: string): boolean {
 	return process.env[name] === "1" || process.env[name] === "true";
@@ -274,9 +308,11 @@ export function createStreamHandler(
 	args: StreamArgs,
 ): AsyncGenerator<{ type: string; [k: string]: unknown }> {
 	return (async function* handler() {
-		const ctx = state.ctx;
+		const ctx = await waitForSessionContext(state, args.options?.signal);
 		if (!ctx) {
-			yield* failWith("auto-router: session context not ready (stream before session_start)");
+			yield* failWith(
+				"auto-router: session context not ready — no session_start received before the request; restart the omp session or reload the extension",
+			);
 			return;
 		}
 		const profileName = args.model.id.replace(/^auto-router\//, "");
@@ -455,12 +491,12 @@ export function createStreamHandler(
 				state.latency.record(key, Date.now() - targetStart);
 				if (!state.shadowEnabled) {
 					const key = `${target.provider}/${target.model}`;
-					state.sessionUseage.calls.set(key, (state.sessionUseage.calls.get(key) ?? 0) + 1);
+					state.sessionUsage.calls.set(key, (state.sessionUsage.calls.get(key) ?? 0) + 1);
 					if (decision.thinking !== undefined) {
-						let seen = state.sessionUseage.thinking.get(key);
+						let seen = state.sessionUsage.thinking.get(key);
 						if (!seen) {
 							seen = new Set<string>();
-							state.sessionUseage.thinking.set(key, seen);
+							state.sessionUsage.thinking.set(key, seen);
 						}
 						seen.add(decision.thinking);
 					}
@@ -557,7 +593,7 @@ function recordUsage(
 	);
 	if (!state.shadowEnabled) {
 		const key = `${target.provider}/${target.model}`;
-		state.sessionUseage.cost.set(key, (state.sessionUseage.cost.get(key) ?? 0) + estimatedCost);
+		state.sessionUsage.cost.set(key, (state.sessionUsage.cost.get(key) ?? 0) + estimatedCost);
 	}
 	state.eventLog.append({
 		type: "settled",

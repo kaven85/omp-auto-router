@@ -24,7 +24,7 @@ mock.module("@oh-my-pi/pi-ai/error", () => ({
 	isProviderRetryableError: (error: unknown) => retryableBehavior(error),
 }));
 
-const { createStreamHandler, buildWidgetLines, renderWidget } = await import("../../src/omp-adapter/router");
+const { createStreamHandler, buildWidgetLines, renderWidget, waitForSessionContext } = await import("../../src/omp-adapter/router");
 const { createAdapterState } = await import("../../src/omp-adapter/state");
 const { refreshModels } = await import("../../src/omp-adapter/state");
 const { CircuitBreaker } = await import("../../src/core/circuit-breaker");
@@ -392,6 +392,78 @@ describe("adapter router (Mode A)", () => {
 			rmSync(configDir, { recursive: true, force: true });
 		}
 	});
+	test("stream before session_start waits for the boot event and routes", async () => {
+		const { api, state, ctx, dir } = setup();
+		streamBehavior = async function* () {
+			yield { type: "text_delta", contentIndex: 0, delta: "ok", partial: {} };
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		// ctx lands on a microtask, as a slow session_start would.
+		queueMicrotask(() => {
+			state.ctx = ctx;
+		});
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context: contextWithPrompt("@reasoning prove primes"),
+			options: {},
+		});
+		const types: string[] = [];
+		for await (const event of handler) types.push(event.type);
+		expect(types).toEqual(["text_delta", "done"]);
+		expect(streamCalls).toEqual([{ provider: "anthropic", model: "opus" }]);
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("stream with no session context fails with an actionable error", async () => {
+		const { api, state, dir } = setup();
+		const controller = new AbortController();
+		controller.abort();
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context: contextWithPrompt("@reasoning prove primes"),
+			options: { signal: controller.signal },
+		});
+		const events: Array<{ type: string; [k: string]: unknown }> = [];
+		for await (const event of handler) events.push(event);
+		expect(events).toHaveLength(1);
+		expect(events[0]!.type).toBe("error");
+		// failWith contract: adapter errors carry an assistant message.
+		const errorMessage = events[0]!.error as { content?: Array<{ text?: string }> };
+		expect(errorMessage.content?.[0]?.text ?? "").toContain("session context not ready");
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("waitForSessionContext returns immediately when ctx is already set", async () => {
+		const { state, ctx } = setup();
+		state.ctx = ctx;
+		await expect(waitForSessionContext(state, undefined, 5_000)).resolves.toBe(ctx);
+	});
+
+	test("waitForSessionContext returns ctx that lands mid-wait", async () => {
+		const { state, ctx } = setup();
+		queueMicrotask(() => {
+			state.ctx = ctx;
+		});
+		const got = await waitForSessionContext(state, undefined, 1_000);
+		expect(got).toBe(ctx);
+	});
+
+	test("waitForSessionContext times out with undefined", async () => {
+		const { state } = setup();
+		const started = Date.now();
+		const got = await waitForSessionContext(state, undefined, 30);
+		expect(got).toBeUndefined();
+		expect(Date.now() - started).toBeGreaterThanOrEqual(20);
+	});
+
+	test("waitForSessionContext aborts immediately on signal", async () => {
+		const { state } = setup();
+		const controller = new AbortController();
+		controller.abort();
+		const got = await waitForSessionContext(state, controller.signal, 5_000);
+		expect(got).toBeUndefined();
+	});
+
 	test("rewriting user text keeps image parts", async () => {
 		const { api, state, ctx, dir } = setup();
 		streamBehavior = async function* () {

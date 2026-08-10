@@ -197,7 +197,7 @@ const SUBCOMMANDS: SubcommandHelp[] = [
 	{ sub: "uvi", usage: "show|enable|disable|refresh", description: "UVI 配额配速监控", example: "/auto-router uvi show" },
 	{ sub: "shadow", usage: "show|enable|disable", description: "影子模式（照记决策、按配置顺序路由）", example: "/auto-router shadow enable" },
 	{ sub: "rate", usage: "good|bad [comment]", description: "给上次决策打分（持久化，驱动反馈闭环）", example: "/auto-router rate good" },
-	{ sub: "useage", usage: "[page]", description: "本会话 settled 调用统计 + provider 接口余量（别名 usage）", example: "/auto-router useage 2" },
+	{ sub: "usage", usage: "[page]", description: "本会话 settled 调用统计 + provider 接口余量（旧名 useage 仍可用）", example: "/auto-router usage 2" },
 	{ sub: "help", usage: "", description: "本帮助", example: "/auto-router help" },
 ];
 /** Second-level action completions per subcommand — sync with the switch below. */
@@ -570,18 +570,18 @@ async function runCommand(rawArgs: string, deps: CommandDeps, ctx: OmpExtensionC
 			);
 			return;
 		}
-		case "useage":
-		case "usage": {
+		case "usage":
+		case "useage": {
 			const page = Math.max(1, Number(arg.trim()) || 1);
 			const pageSize = 8;
-			const calls = [...state.sessionUseage.calls.entries()].sort((a, b) => b[1] - a[1]);
+			const calls = [...state.sessionUsage.calls.entries()].sort((a, b) => b[1] - a[1]);
 			const totalPages = Math.max(1, Math.ceil(calls.length / pageSize));
 			const currentPage = Math.min(page, totalPages);
 			const slice = calls.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
 			// Per-provider session cost rollup
 			const providerCost = new Map<string, number>();
-			for (const [key, cost] of state.sessionUseage.cost) {
+			for (const [key, cost] of state.sessionUsage.cost) {
 				const provider = key.split("/")[0] ?? key;
 				providerCost.set(provider, (providerCost.get(provider) ?? 0) + cost);
 			}
@@ -604,8 +604,8 @@ async function runCommand(rawArgs: string, deps: CommandDeps, ctx: OmpExtensionC
 			);
 
 			const modelRows = slice.map(([key, count]) => {
-				const cost = state.sessionUseage.cost.get(key) ?? 0;
-				const thinking = state.sessionUseage.thinking.get(key);
+				const cost = state.sessionUsage.cost.get(key) ?? 0;
+				const thinking = state.sessionUsage.thinking.get(key);
 				const thinkingSuffix =
 					thinking && thinking.size > 0
 						? ` [${[...thinking].sort().join(", ")}]`
@@ -625,7 +625,7 @@ async function runCommand(rawArgs: string, deps: CommandDeps, ctx: OmpExtensionC
 					"",
 					...providerCostRows,
 					...(quotaRows.length > 2 ? ["", "provider quota:", ...quotaRows] : ["", "provider quota: no data from host interface"]),
-					...(totalPages > 1 ? ["", `Page ${currentPage}/${totalPages} — /auto-router useage ${currentPage + 1} for next`] : []),
+					...(totalPages > 1 ? ["", `Page ${currentPage}/${totalPages} — /auto-router usage ${currentPage + 1} for next`] : []),
 				]),
 				"info",
 			);

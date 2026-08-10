@@ -87,7 +87,7 @@ export interface AdapterState {
 	/** User ratings of routing decisions. */
 	ratings: FeedbackTracker;
 	/** Per-session settled-call stats (normal mode only; shadow pauses counting). */
-	sessionUseage: {
+	sessionUsage: {
 		/** "provider/model" → successful settled call count this session. */
 		calls: Map<string, number>;
 		/** "provider/model" → estimated USD cost this session. */
@@ -151,7 +151,7 @@ export function createAdapterState(
 		cooldowns: new Map(),
 		testFailureAt: undefined,
 		ratings: new FeedbackTracker(ratingsStore),
-		sessionUseage: { calls: new Map(), cost: new Map(), thinking: new Map() },
+		sessionUsage: { calls: new Map(), cost: new Map(), thinking: new Map() },
 	};
 }
 

@@ -188,23 +188,27 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 	});
 
 	const boot = async (ctx: OmpExtensionContext): Promise<void> => {
-		state.ctx = ctx;
-		state.doctorProbes.models = ctx.models.list().length > 0;
-		state.doctorProbes.ui = typeof ctx.ui?.notify === "function" && typeof ctx.ui?.setStatus === "function";
-		state.doctorProbes.quota = typeof ctx.modelRegistry?.authStorage?.fetchUsageReports === "function";
-		refreshModels(state, ctx);
-		restoreDecisions(state, ctx);
+		// Write through the live ref: `reloadConfig` swaps stateRef.current to a
+		// fresh object, and booting the stale closure would orphan the ctx.
+		const current = stateRef.current;
+		if (!current) return;
+		current.ctx = ctx;
+		current.doctorProbes.models = ctx.models.list().length > 0;
+		current.doctorProbes.ui = typeof ctx.ui?.notify === "function" && typeof ctx.ui?.setStatus === "function";
+		current.doctorProbes.quota = typeof ctx.modelRegistry?.authStorage?.fetchUsageReports === "function";
+		refreshModels(current, ctx);
+		restoreDecisions(current, ctx);
 
 		// ── Path-scoped profile activation (activate:) ──────────────────────
-		const pathProfile = matchPathActivation(state, ctx.cwd);
+		const pathProfile = matchPathActivation(current, ctx.cwd);
 		if (pathProfile) {
-			const current = ctx.models.current();
-			const already = current?.provider === "auto-router" && current.id === pathProfile;
+			const activeModel = ctx.models.current();
+			const already = activeModel?.provider === "auto-router" && activeModel.id === pathProfile;
 			if (!already) {
 				const ok = await pi.setModel({ provider: "auto-router", id: pathProfile, api: "auto-router" });
 				if (ok) {
 					pi.appendEntry("com.omp.auto-router.state", { profile: pathProfile });
-					state.eventLog.append({ type: "profile-switch", at: Date.now(), profile: pathProfile, reason: "path-activation" });
+					current.eventLog.append({ type: "profile-switch", at: Date.now(), profile: pathProfile, reason: "path-activation" });
 				} else {
 					pi.logger.warn(`auto-router: path activation to "${pathProfile}" failed`);
 				}

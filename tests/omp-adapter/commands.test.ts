@@ -223,7 +223,7 @@ describe("adapter commands", () => {
 		expect(notifies.join("\n")).toContain("anthropic/sonnet");
 	});
 
-	test("useage fetches provider quota from the omp auth chain when cache is empty", async () => {
+	test("usage fetches provider quota from the omp auth chain when cache is empty", async () => {
 		const { api, state, notifies } = setup();
 		let fetched = 0;
 		const newCtx = api.makeCtx({
@@ -253,7 +253,7 @@ describe("adapter commands", () => {
 		});
 		const def = api.commands.get("auto-router");
 		expect(def).toBeDefined();
-		await def!.handler("useage", newCtx);
+		await def!.handler("usage", newCtx);
 		const out = notifies.join("\n");
 		expect(fetched).toBe(1);
 		expect(out).toContain("provider quota:");
@@ -326,9 +326,9 @@ describe("adapter commands", () => {
 		expect(out).toContain("请求内钉层");
 	});
 
-	test("usage works as an alias for useage", async () => {
+	test("useage works as an alias for usage", async () => {
 		const { invoke, notifies } = setup();
-		await invoke("usage");
+		await invoke("useage");
 		expect(notifies.join("\n")).toContain("usage — page 1/1");
 	});
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `/auto-router usage` is now the canonical name for the session usage command (the `useage` typo still works as an alias). Help text, README, and the internal `sessionUsage` state field renamed accordingly.
+- Requests that reach the virtual provider before `session_start` (early prompts, extension hot-reload mid-session) now wait up to 5s for the boot event instead of failing immediately; the boot handler also writes through the live state ref so a config reload can't orphan the session context.
+
 ## [0.3.1] - 2026-08-07
 
 ### Added

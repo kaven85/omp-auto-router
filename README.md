@@ -128,6 +128,7 @@ modelRoles:
 |---|---|---|
 | `Model "auto-router/xxx" not found` | 虚拟模型注册失败或 targets 与真实模型不一致 | `/auto-router doctor` 看 H1；`/model` 核对 target id |
 | `/auto-router` 提示 `not ready` | session_start boot 未完成 | 等待会话就绪后重试；看 omp 日志 `auto-router: boot failed` |
+| 首条消息报 `session context not ready` | 请求早于 session_start（会话刚启动/扩展热加载） | 自动等待 ≤5s 后重试；仍失败则重启 omp 会话 |
 | 发了消息但事件日志无 decision | 当前模型不是 auto-router/*（modelRoles 未生效） | `/model` 确认当前模型；检查 config.yml 拼写后重启会话 |
 | doctor 显示 config errors | auto-router.yml 校验失败（如 targets 为空） | 按报错 dotted path 修正；错误层会回退到内置默认 |
 | 决策全是预算阻断/换链 | budget 超限或 UVI critical | `/auto-router budget show`、`/auto-router uvi show`；`clear` 后重试 |
@@ -234,7 +235,7 @@ activate:                           # 按 cwd 前缀自动激活
 | `model` | string | ✅ | 与 `/model` 显示的 id 一致 |
 | `label` | string | 否 | 展示标签 |
 | `billing` | `subscription/per-token` | 否 | 缺省 `subscription`；影响预算桶与合成 UVI |
-| `balanceEndpoint` | string | 否 | 自定义余额 API（per-token 提供商）；覆盖 provider registry 内置默认（deepseek），响应接受 deepseek 或 `{currency, total_balance}` 形状，余额显示在 `/auto-router useage` |
+| `balanceEndpoint` | string | 否 | 自定义余额 API（per-token 提供商）；覆盖 provider registry 内置默认（deepseek），响应接受 deepseek 或 `{currency, total_balance}` 形状，余额显示在 `/auto-router usage` |
 | `thinkingCap` | `{min?, max?}` | 否 | 该模型接受的 thinking 强度范围（含端点）；覆盖 provider registry 内置默认。tier 配置的 thinking 超出范围时会被钳制到范围内再下发，并记一条 `warn` 事件。例：`deepseek-v4-pro` 内置 `{min: high}`（只接受 high/max，拒绝 low/medium） |
 
 凭证走 omp 的 auth 链（`agent.db` 多凭证），**无需**在配置里写密钥。
