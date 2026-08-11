@@ -1,6 +1,19 @@
 # Changelog
 
 
+## [0.4.2] - 2026-08-11
+
+### Fixed
+
+- Provider errors were logged as `[object Object]`: omp providers throw plain objects (`{status, error:{message}}`), and `String()` erased them. A new `formatError` unwraps Error/string/`{message}`/`{error:{message}}` shapes, annotates `[status N]`, and falls back to JSON — applied to every event-log error append (target failure, failover, thinking-level restore, quota fetch).
+- Pressing Esc no longer cools the target down: `onTargetFailed` fired before the AbortError guard, and pi-ai's `{type:"error", reason:"aborted"}` terminal event bypassed it entirely, so a user abort put the target into cooldown and left single-target profiles with "no eligible candidates". Abort checks now run before failure recording — neither AbortError nor an aborted terminal event touches cooldown/circuit/failover.
+
+### Changed
+
+- Post-failure cooldown default shortened from 5 minutes to 60s, overridable via `OMP_AUTO_ROUTER_COOLDOWN_MS` (floored at 5s).
+- Cooldowns now record the failure that caused them: the "no eligible candidates" error names the excluding layer (`auto-router [constraint-solver]`) and shows each cooled target's last failure, e.g. `cooling down until … (last failure: rate limit reached [status 429])`.
+
+
 ## [0.4.1] - 2026-08-11
 
 ### Fixed
