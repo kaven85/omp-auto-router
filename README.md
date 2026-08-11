@@ -19,10 +19,10 @@
 - **策略规则**：force-tier / prefer / exclude-provider / force-billing / force-constraint，支持时间段与周几条件
 - **影子模式**：照记决策但按配置顺序路由，对比验证
 - **可解释**：`/auto-router explain` 输出完整推理链与链上候选评分；决策/用量 JSONL 落盘
-- **跨重启记忆**：熔断器状态与延迟滚动均值持久化（`circuit.json` / `latency.json`），重启后 warm-start
+- **跨重启记忆**：熔断器状态与首个可见输出延迟滚动均值持久化（`circuit.json` / `first-output-latency.json`），重启后 warm-start
 - **环境开关**：`OMP_AUTO_ROUTER_UVI_HARD=1`（stressed UVI 直接排除）、`OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>`（分类置信度阈值，默认 0.45）、`OMP_AUTO_ROUTER_QUOTA_REFRESH_MS=<ms>`（配额刷新节奏，默认 30000，下限 10000）
 - **后台配额刷新**：session 启动后每 30s 后台刷新 UVI 配额（host managed timer），请求路径不再因缓存过期而阻塞
-- **仪表盘 widget**：决策后渲染 profile/预算/熔断/UVI 概览；后台刷新落地后立即重渲染，已过 resetsAt 的配额窗口按已重置显示，内容无变化时不重复渲染（host 无 setWidget 时自动降级）
+- **仪表盘 widget**：决策后渲染 profile/目标/首个可见输出延迟/预算/熔断/UVI 概览；后台刷新落地后立即重渲染，已过 resetsAt 的配额窗口按已重置显示，内容无变化时不重复渲染（host 无 setWidget 时自动降级）
 - **Provider registry**：provider 专属知识（Kimi 窗口标签、DeepSeek 余额端点、模型 thinking 强度范围）集中在 `provider-registry.ts`；target 级 `balanceEndpoint` / `thinkingCap` 可覆盖默认
 - **日志轮转**：事件日志超过 ~2MB 自动截断保留最新一半；预算 daily 桶保留 62 天（monthly 无限期）
 - **分析脚本**：`bun scripts/routing-stats.ts` 聚合事件日志（profile/tier/target 分布、failover、top 错误）

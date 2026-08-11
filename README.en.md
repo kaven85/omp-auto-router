@@ -19,10 +19,10 @@ Ported from the design ideas of [pi-auto-router](https://github.com/danialranjha
 - **Policy rules**: force-tier / prefer / exclude-provider / force-billing / force-constraint, with hour-of-day and weekday conditions
 - **Shadow mode**: record decisions but route by configured order, for comparison and validation
 - **Explainable**: `/auto-router explain` prints the full reasoning chain plus per-candidate ratings; decisions/usage are persisted as JSONL
-- **Restart memory**: circuit-breaker state and latency rolling means persist (`circuit.json` / `latency.json`) for warm starts
+- **Restart memory**: circuit-breaker state and rolling first-visible-output latency persist (`circuit.json` / `first-output-latency.json`) for warm starts
 - **Env switches**: `OMP_AUTO_ROUTER_UVI_HARD=1` (exclude stressed-UVI providers), `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>` (classifier confidence gate, default 0.45)
 - **Background quota refresh**: UVI quota snapshots refresh every 30s in the background (host-managed timer), so requests never block on an expired cache
-- **Dashboard widget**: after each decision a profile/budget/circuit/UVI overview is rendered via `setWidget` (degrades silently when the host lacks it)
+- **Dashboard widget**: after each decision a profile/target/first-visible-output latency/budget/circuit/UVI overview is rendered via `setWidget` (degrades silently when the host lacks it)
 - **Provider registry**: provider-specific knowledge (Kimi window labels, DeepSeek balance endpoint, per-model thinking ranges) lives in `provider-registry.ts`; target-level `balanceEndpoint` / `thinkingCap` override the defaults
 - **Log rotation**: the event log truncates to its newest half past ~2 MB; daily budget buckets are kept for 62 days (monthly rollups indefinitely)
 - **Analytics script**: `bun scripts/routing-stats.ts` aggregates the event log (decisions per profile/tier/target, failovers, top errors)

@@ -275,15 +275,14 @@ describe("partitionCandidates billing preference", () => {
 		expect(keys(ordered)).toEqual(["sub/m", "metered/m"]);
 	});
 
-	test("subscription keeps priority even when many times slower than per-token", () => {
-		// Real-world case: subscription frontier model averaging 22.8s total
-		// stream time vs metered flash model at 1.7s. Relative speed is
-		// ignored — total duration confounds model speed with response length.
+	test("responsive subscription keeps priority over a faster per-token model", () => {
+		// A few seconds to first streamed thinking is responsive; relative speed
+		// alone must not move a metered fallback ahead of the subscription.
 		const sub = candidate("sub", "m");
 		const metered = perToken("metered");
 		const { ordered } = partitionCandidates(
 			[metered, sub],
-			input({ latency: { "sub/m": 22_787, "metered/m": 1_675 } }),
+			input({ latency: { "sub/m": 5_000, "metered/m": 2_681 } }),
 		);
 		expect(keys(ordered)).toEqual(["sub/m", "metered/m"]);
 	});

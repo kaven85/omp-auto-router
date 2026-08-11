@@ -27,18 +27,18 @@ export function collectProfileBudgets(config: RouterConfig): Record<string, Budg
 	return merged;
 }
 
-/** Warm-start circuit breaker and latency rolling means from persisted snapshots (best effort). */
+/** Warm-start circuit breaker and first-visible-output rolling means from persisted snapshots. */
 function restoreTrackers(stateStore: JsonStateStore, circuit: CircuitBreaker, latency: LatencyTracker): void {
 	const circuitSnapshot = stateStore.readJson<Record<string, { consecutiveFailures: number; openedAt: number; cooldownMs: number }>>("circuit.json");
 	if (circuitSnapshot) circuit.restore(circuitSnapshot);
-	const latencySnapshot = stateStore.readJson<Record<string, number>>("latency.json");
+	const latencySnapshot = stateStore.readJson<Record<string, number>>("first-output-latency.json");
 	if (latencySnapshot) latency.restore(latencySnapshot);
 }
 
-/** Persist circuit breaker + latency snapshots so restarts keep warm-start data. */
+/** Persist circuit breaker + first-visible-output latency snapshots across restarts. */
 export function persistTrackers(state: AdapterState): void {
 	state.stateStore.writeJson("circuit.json", state.circuit.snapshot());
-	state.stateStore.writeJson("latency.json", state.latency.snapshot());
+	state.stateStore.writeJson("first-output-latency.json", state.latency.snapshot());
 }
 
 export interface AdapterState {

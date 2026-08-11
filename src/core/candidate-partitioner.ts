@@ -19,11 +19,13 @@
  * Ordering: buckets concatenate as promoted → normal → demoted. Within a
  * bucket, subscription-billed candidates outrank per-token ones — quota
  * already paid for is spent before metered balance. A per-token candidate
- * only jumps ahead of a subscription candidate whose rolling latency has
- * crossed an absolute usability bar (see SUBSCRIPTION_LATENCY_MAX_MS);
- * relative speed is ignored because total stream duration confounds model
- * speed with response length. Among same-billing candidates the sort is rolling-average latency ascending; candidates without latency
- * history sort last. Ties (unknown or equal latency) break by estimated
+ * only jumps ahead of a subscription candidate whose rolling
+ * first-visible-output latency has crossed an absolute usability bar (see
+ * SUBSCRIPTION_LATENCY_MAX_MS); relative speed is ignored because the user
+ * experience depends on when streamed thinking or answer content first
+ * appears. Among same-billing candidates the sort is rolling-average latency
+ * ascending; candidates without latency history sort last. Ties (unknown or
+ * equal latency) break by estimated
  * per-request cost ascending when BOTH candidates expose cost — using a flat
  * 1M-input + 1M-output-token estimate for comparison only. Anything still
  * tied keeps its input order (stable sort).
@@ -38,7 +40,7 @@ export interface PartitionInput {
 	uvi: Record<string, UviResult>;
 	/** provider → budget audit (absent = no limit / no data). */
 	budget: Record<string, BudgetAudit>;
-	/** "provider/model" → rolling-average latency ms (absent = no history). */
+	/** "provider/model" → rolling first-visible-output latency ms (absent = no history). */
 	latency: Record<string, number>;
 	/** Circuit breaker consulted per candidate key. */
 	circuit: CircuitBreaker;
@@ -131,22 +133,19 @@ function bucketOf(
 
 /**
  * Subscription→per-token override: a per-token candidate may outrank a
- * subscription candidate only when the subscription rolling latency exceeds
- * an absolute "unusable" bar. Latency here is total stream duration, which
- * grows with response length as much as with model speed — a frontier
- * subscription model doing real work is routinely 10× "slower" than a
- * flash-class metered model while serving perfectly well. A ratio-based
- * comparison would therefore dethrone subscription models almost
- * permanently; only an absolute usability bar matches "switch when the
- * degradation actually hurts normal use".
+ * subscription candidate only when the subscription's rolling latency to its
+ * first visible output exceeds an absolute "unusable" bar. Visible output
+ * includes streamed thinking, so long reasoning or long answers do not make a
+ * responsive model look slow. An absolute bar avoids permanently dethroning a
+ * subscription model because a metered flash model is merely faster.
  */
 export const SUBSCRIPTION_LATENCY_MAX_MS = 60_000;
 
 /**
  * Comparator: subscription billing first (per-token only ahead when the
- * subscription latency is significantly degraded), then latency ascending
- * (no-history last), then estimated cost ascending when both sides expose
- * cost, else 0 (stable — input order kept).
+ * subscription's first-visible-output latency is unusable), then latency
+ * ascending (no-history last), then estimated cost ascending when both sides
+ * expose cost, else 0 (stable — input order kept).
  */
 function compareCandidates(
 	input: PartitionInput,

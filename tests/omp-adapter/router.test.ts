@@ -231,6 +231,34 @@ describe("adapter router (Mode A)", () => {
 		expect(revived.latency.average("anthropic/opus")).toBeGreaterThanOrEqual(0);
 	});
 
+	test("latency tracks first visible thinking output, not time to final text", async () => {
+		const { api, state, ctx, dir } = setup();
+		const realNow = Date.now;
+		let now = 1_000;
+		Date.now = () => now;
+		try {
+			streamBehavior = async function* () {
+				now += 5;
+				yield { type: "thinking_delta", contentIndex: 0, delta: "working", partial: {} };
+				now += 80;
+				yield { type: "text_delta", contentIndex: 0, delta: "done", partial: {} };
+			};
+			state.ctx = ctx;
+			const handler = createStreamHandler(state, api, {
+				model: { provider: "auto-router", id: "premium" },
+				context: contextWithPrompt("@reasoning hard problem"),
+				options: {},
+			});
+			for await (const _event of handler) {
+				// Drain the routed stream.
+			}
+			expect(state.latency.average("anthropic/opus")).toBe(5);
+		} finally {
+			Date.now = realNow;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("a failed target is cooled down and skipped on the next request", async () => {
 		const { api, state, ctx } = setup();
 		state.ctx = ctx;
@@ -964,6 +992,15 @@ describe("widget rendering", () => {
 		expect(buildWidgetLines(state, decisionFor("wt-p", "subscription"))).toEqual([
 			"main | tier=standard | wt-p/m",
 			"uvi: wt-p 70% left",
+		]);
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("widget shows the selected model's first visible output latency", () => {
+		const { state, dir } = setup();
+		state.latency.record("kimi-code/m", 65_653);
+		expect(buildWidgetLines(state, decisionFor("kimi-code"))).toEqual([
+			"main | tier=standard | kimi-code/m | first output=65.7s",
 		]);
 		rmSync(dir, { recursive: true, force: true });
 	});

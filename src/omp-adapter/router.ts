@@ -68,6 +68,13 @@ const CTX_READY_WAIT_MS = 5_000;
 
 const TIER_LADDER = ["trivial", "simple", "standard", "complex"] as const;
 
+function observedLatencySuffix(state: AdapterState, decision: RoutingDecision): string {
+	const key = `${decision.target.provider}/${decision.target.model}`;
+	const averageMs = state.latency.average(key);
+	if (averageMs === undefined) return "";
+	return ` | first output=${(averageMs / 1_000).toFixed(1)}s`;
+}
+
 /**
  * Compose the dashboard widget: decision line (when a decision exists) plus
  * live budget/circuit/UVI snapshots. UVI windows past their `resetsAt` are
@@ -79,7 +86,7 @@ export function buildWidgetLines(state: AdapterState, decision?: RoutingDecision
 	if (decision !== undefined) {
 		const billing = decision.target.billing === "per-token" ? " (per-token)" : "";
 		lines.push(
-			`${decision.profile} | tier=${decision.tier} | ${decision.target.provider}/${decision.target.model}${billing}${decision.thinking !== undefined ? ` | ${decision.thinking}` : ""}`,
+			`${decision.profile} | tier=${decision.tier} | ${decision.target.provider}/${decision.target.model}${billing}${decision.thinking !== undefined ? ` | ${decision.thinking}` : ""}${observedLatencySuffix(state, decision)}`,
 		);
 	}
 	const budgetBits: string[] = [];
@@ -186,6 +193,14 @@ function rewriteLastUserText(context: StreamArgs["context"], text: string): void
 	}
 }
 
+
+/** Events that make a streaming model feel responsive to the user. */
+function isVisibleResponseEvent(event: { type: string; [k: string]: unknown }): boolean {
+	if (event.type === "thinking_delta" || event.type === "text_delta" || event.type === "toolcall_delta") {
+		return typeof event.delta === "string" && event.delta.length > 0;
+	}
+	return event.type === "image_end" || event.type === "toolcall_start" || event.type === "toolcall_end" || event.type === "done";
+}
 /** Build the delegate factory: each candidate → host streamSimple with its key. */
 function buildFactory(
 	state: AdapterState,
@@ -193,6 +208,7 @@ function buildFactory(
 	context: StreamArgs["context"],
 	options: StreamArgs["options"],
 	onTargetStart?: (target: { provider: string; model: string }) => void,
+	onTargetVisible?: (target: { provider: string; model: string }) => void,
 ) {
 	const host = createHostPorts(pi, state.ctx!, state);
 	return async function* factory(target: { provider: string; model: string }) {
@@ -206,7 +222,12 @@ function buildFactory(
 			...(options ?? {}),
 			...(apiKey !== undefined ? { apiKey } : {}),
 		} as never);
+		let visible = false;
 		for await (const event of stream) {
+			if (!visible && isVisibleResponseEvent(event)) {
+				visible = true;
+				onTargetVisible?.(target);
+			}
 			yield event as never;
 		}
 	};
@@ -445,7 +466,7 @@ export function createStreamHandler(
 			...(decision.thinking !== undefined ? { thinking: decision.thinking } : {}),
 		});
 		host.setStatus(
-			`auto-router ${decision.profile} | tier=${decision.tier} (${decision.confidence.toFixed(2)}) | ${decision.target.provider}/${decision.target.model}${decision.thinking !== undefined ? ` | thinking=${decision.thinking}` : ""}`,
+			`auto-router ${decision.profile} | tier=${decision.tier} (${decision.confidence.toFixed(2)}) | ${decision.target.provider}/${decision.target.model}${decision.thinking !== undefined ? ` | thinking=${decision.thinking}` : ""}${observedLatencySuffix(state, decision)}`,
 		);
 		// Balance-capable providers (e.g. deepseek) surface their wallet via the
 		// balance API, not usage-report windows — fetch + cache it so the widget
@@ -469,8 +490,8 @@ export function createStreamHandler(
 		rewriteLastUserText(args.context, cleanPrompt);
 
 		// Failover across the ordered chain; thinking-only partials stay failover-eligible.
-		const started = Date.now();
 		const targetStarts = new Map<string, number>();
+		const targetFirstOutputs = new Map<string, number>();
 		let settledTarget: { provider: string; model: string } | undefined;
 		const hooks = {
 			// Fail over on transient provider errors (omp classifier) OR on
@@ -508,11 +529,10 @@ export function createStreamHandler(
 				const key = `${target.provider}/${target.model}`;
 				state.circuit.recordSuccess(key);
 				state.cooldowns.delete(key);
-				// Latency is measured from THIS target's stream start, not the
-				// failover chain's — otherwise a slow dead first candidate would
-				// poison the rolling mean of the fallback that actually answered.
-				const targetStart = targetStarts.get(key) ?? started;
-				state.latency.record(key, Date.now() - targetStart);
+				const firstOutputMs = targetFirstOutputs.get(key);
+				if (firstOutputMs !== undefined) {
+					state.latency.record(key, firstOutputMs);
+				}
 				if (!state.shadowEnabled) {
 					const key = `${target.provider}/${target.model}`;
 					state.sessionUsage.calls.set(key, (state.sessionUsage.calls.get(key) ?? 0) + 1);
@@ -528,9 +548,22 @@ export function createStreamHandler(
 			},
 		};
 
-		const factory = buildFactory(state, pi, args.context, args.options, (target) => {
-			targetStarts.set(`${target.provider}/${target.model}`, Date.now());
-		});
+		const factory = buildFactory(
+			state,
+			pi,
+			args.context,
+			args.options,
+			(target) => {
+				targetStarts.set(`${target.provider}/${target.model}`, Date.now());
+			},
+			(target) => {
+				const key = `${target.provider}/${target.model}`;
+				const targetStart = targetStarts.get(key);
+				if (targetStart !== undefined) {
+					targetFirstOutputs.set(key, Date.now() - targetStart);
+				}
+			},
+		);
 
 		// Apply the tier's thinking level to the real request: set before the
 		// delegate stream starts, restore the session's previous level when the

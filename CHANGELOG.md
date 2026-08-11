@@ -8,6 +8,7 @@
 - Request-path balance fetch was unreachable: the throttle gate keyed on `quotaCache.at`, but the quota cache was refreshed earlier in the same request, making the condition always false. Balance-capable providers (e.g. deepseek) now use a dedicated `balanceAt` timestamp decoupled from the quota cache, so the wallet balance renders in the dashboard widget on the first request.
 - Widget UVI/balance lines now scope to the current provider only (the full breakdown is in `/auto-router usage`), and `balance:` renders separately from `uvi:` for balance-capable providers whose quota is tracked by wallet rather than usage windows.
 - Decision line in the widget annotates per-token billing with `(per-token)` for immediate transparency.
+- Routing latency now measures time to the first visible streamed output, including thinking deltas, rather than waiting for the first final-answer/tool event. Long visible reasoning no longer makes a responsive Kimi subscription appear stalled and yield priority to a metered fallback. The incompatible old rolling means are intentionally reset via the new `first-output-latency.json` persistence key, and the status/widget labels the metric as `first output`.
 
 ### Changed
 
@@ -16,7 +17,7 @@
 
 ## [0.4.0] - 2026-08-10
 ### Added
-- Subscription-first candidate ordering: within a partition bucket, subscription-billed candidates now outrank per-token ones, so paid quota is spent before metered balance. A per-token candidate only takes the lead when the subscription candidate's rolling latency crosses an absolute usability bar (`SUBSCRIPTION_LATENCY_MAX_MS`, 60s) and is worse than the metered candidate. Relative latency is deliberately ignored across billing groups: the tracked latency is total stream duration, which confounds model speed with response length, so ratio comparisons would dethrone slower-but-healthy subscription models almost permanently.
+- Subscription-first candidate ordering: within a partition bucket, subscription-billed candidates now outrank per-token ones, so paid quota is spent before metered balance. A per-token candidate only takes the lead when the subscription candidate's rolling latency crosses an absolute usability bar (`SUBSCRIPTION_LATENCY_MAX_MS`, 60s) and is worse than the metered candidate. Relative latency is deliberately ignored across billing groups.
 
 ### Fixed
 
