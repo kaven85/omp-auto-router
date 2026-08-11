@@ -6,6 +6,7 @@
  * shapes; everything else in src/core stays host-agnostic.
  */
 
+import { formatError } from "../core/failover-engine";
 import type { HostModel, HostPorts } from "../core/host-ports";
 import type { CandidateInfo, QuotaSnapshot, RouteTarget, ThinkingLevel } from "../core/types";
 import type { AdapterState } from "./state";
@@ -103,7 +104,7 @@ export function createHostPorts(
 				state.eventLog.append({
 					type: "error",
 					at: Date.now(),
-					error: redactSecrets(String(error)),
+					error: redactSecrets(formatError(error)),
 					what: "fetchQuota",
 				});
 				return [];

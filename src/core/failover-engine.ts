@@ -84,6 +84,30 @@ function extractStatus(error: unknown): number | undefined {
 }
 
 /**
+ * Human-readable rendering of a thrown value for logs and diagnostics.
+ * `String(error)` is useless for the plain-object errors omp providers throw
+ * ({status, error:{message}} → "[object Object]"), so unwrap the common
+ * shapes first; fall back to JSON for anything else.
+ */
+export function formatError(error: unknown): string {
+	const message = extractMessage(error);
+	const status = extractStatus(error);
+	if (message !== undefined) {
+		return status !== undefined && !message.includes(String(status))
+			? `${message} [status ${status}]`
+			: message;
+	}
+	if (typeof error === "object" && error !== null) {
+		try {
+			return JSON.stringify(error);
+		} catch {
+			// circular — fall through
+		}
+	}
+	return String(error);
+}
+
+/**
  * Default retryability classifier: retry on 429/500/502/503/504 statuses and
  * on overload / rate-limit / usage-limit / timeout / socket wording found in
  * Error.message or {status} / {error.message}-shaped values.

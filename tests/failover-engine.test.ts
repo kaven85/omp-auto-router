@@ -4,6 +4,7 @@ import {
 	defaultIsRetryable,
 	defaultIsSubstantive,
 	failoverStream,
+	formatError,
 } from "../src/core/failover-engine";
 import type {
 	FailoverHooks,
@@ -318,5 +319,30 @@ describe("defaultIsRetryable", () => {
 		expect(defaultIsRetryable({ status: 400, message: "bad request" })).toBe(false);
 		expect(defaultIsRetryable(undefined)).toBe(false);
 		expect(defaultIsRetryable(null)).toBe(false);
+	});
+});
+
+describe("formatError", () => {
+	test("renders Error and string shapes directly", () => {
+		expect(formatError(new Error("boom"))).toBe("boom");
+		expect(formatError("plain failure")).toBe("plain failure");
+	});
+
+	test("unwraps omp provider error objects instead of [object Object]", () => {
+		const thrown = {
+			status: 403,
+			error: { type: "permission_error", message: "usage limit reached" },
+		};
+		expect(formatError(thrown)).toBe("usage limit reached [status 403]");
+	});
+
+	test("annotates status only when absent from the message", () => {
+		expect(formatError({ status: 503, message: "503 service unavailable" })).toBe(
+			"503 service unavailable",
+		);
+	});
+
+	test("falls back to JSON for messageless objects", () => {
+		expect(formatError({ code: "ECONNRESET" })).toBe('{"code":"ECONNRESET"}');
 	});
 });

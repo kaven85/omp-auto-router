@@ -15,7 +15,7 @@
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { isProviderRetryableError } from "@oh-my-pi/pi-ai/error";
 
-import { failoverStream, defaultIsRetryable, defaultIsSubstantive } from "../core/failover-engine";
+import { failoverStream, defaultIsRetryable, defaultIsSubstantive, formatError } from "../core/failover-engine";
 import type { FeedbackTracker } from "../core/feedback-tracker";
 import type { HostPorts } from "../core/host-ports";
 import { route } from "../core/pipeline";
@@ -512,7 +512,7 @@ export function createStreamHandler(
 					at: Date.now(),
 					provider: target.provider,
 					model: target.model,
-					error: redactSecrets(String(error)),
+					error: redactSecrets(formatError(error)),
 				});
 			},
 			onFailover: (from: { provider: string; model: string }, to: { provider: string; model: string }, error: unknown) => {
@@ -521,7 +521,7 @@ export function createStreamHandler(
 					at: Date.now(),
 					from: `${from.provider}/${from.model}`,
 					to: `${to.provider}/${to.model}`,
-					error: redactSecrets(String(error)),
+					error: redactSecrets(formatError(error)),
 				});
 			},
 			onTargetSettled: (target: { provider: string; model: string }) => {
@@ -601,7 +601,7 @@ export function createStreamHandler(
 					type: "error",
 					at: Date.now(),
 					what: "setThinkingLevel",
-					error: redactSecrets(String(error)),
+					error: redactSecrets(formatError(error)),
 				});
 			}
 		}

@@ -604,6 +604,38 @@ describe("adapter router (Mode A)", () => {
 		rmSync(dir, { recursive: true, force: true });
 	});
 
+	test("failover event log renders plain-object errors, not [object Object]", async () => {
+		const { api, state, ctx, dir } = setup();
+		streamBehavior = async function* (model) {
+			if (model.provider === "anthropic" && model.id === "opus") {
+				throw {
+					status: 429,
+					error: { type: "rate_limit_error", message: "rate limit reached, retry after 30s" },
+				};
+			}
+			yield { type: "text_delta", contentIndex: 0, delta: "ok", partial: {} };
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		const context = contextWithPrompt("@reasoning hard problem");
+		state.ctx = ctx;
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context,
+			options: {},
+		});
+		for await (const _event of handler) {
+			// drain
+		}
+		const events = state.eventLog.readAll();
+		const logged = events.filter((e) => (e.type === "error" || e.type === "failover") && typeof e.error === "string");
+		expect(logged.length).toBeGreaterThan(0);
+		for (const event of logged) {
+			expect(event.error).not.toBe("[object Object]");
+			expect(event.error).toContain("rate limit reached");
+		}
+		rmSync(dir, { recursive: true, force: true });
+	});
+
 	test("kimi profile: exhausted kimi fails over to deepseek (mirrors real config)", async () => {
 		const api = new MockExtensionApi();
 		// Mirrors ~/.omp/agent/auto-router.yml:kimi — kimi first, deepseek fallback.
