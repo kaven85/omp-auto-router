@@ -13,6 +13,7 @@ import { LatencyTracker } from "../core/latency-tracker";
 import { ProfileRegistry } from "../core/profile-registry";
 import type { HostPorts } from "../core/host-ports";
 import type { BudgetLimit, RouterConfig, RoutingDecision, QuotaSnapshot } from "../core/types";
+import type { ProviderBalance } from "./provider-registry";
 import type { OmpExtensionContext, OmpModel } from "./omp-api";
 
 export function collectProfileBudgets(config: RouterConfig): Record<string, BudgetLimit> {
@@ -80,6 +81,10 @@ export interface AdapterState {
 	shadowEnabled: boolean;
 	/** Throttled quota fetch cache: { at, data }. */
 	quotaCache: { at: number; data: QuotaSnapshot[] };
+	/** Epoch ms of the most recent balance fetch (throttles the request path). */
+	balanceAt: number;
+	/** Throttled per-provider balance cache (balance-capable providers only). */
+	balanceCache: Record<string, ProviderBalance>;
 	/** "provider/model" → epoch ms until which the target is excluded (transient cooldown after failure). */
 	cooldowns: Map<string, number>;
 	/** Epoch ms of the most recent test/build tool failure; drives temporary tier escalation. */
@@ -147,6 +152,8 @@ export function createAdapterState(
 		configErrors,
 		uviEnabled: true,
 		shadowEnabled: false,
+		balanceAt: 0,
+		balanceCache: {},
 		quotaCache: { at: 0, data: [] },
 		cooldowns: new Map(),
 		testFailureAt: undefined,

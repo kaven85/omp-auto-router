@@ -1,9 +1,21 @@
 # Changelog
 
+
+## [0.4.1] - 2026-08-11
+
+### Fixed
+
+- Request-path balance fetch was unreachable: the throttle gate keyed on `quotaCache.at`, but the quota cache was refreshed earlier in the same request, making the condition always false. Balance-capable providers (e.g. deepseek) now use a dedicated `balanceAt` timestamp decoupled from the quota cache, so the wallet balance renders in the dashboard widget on the first request.
+- Widget UVI/balance lines now scope to the current provider only (the full breakdown is in `/auto-router usage`), and `balance:` renders separately from `uvi:` for balance-capable providers whose quota is tracked by wallet rather than usage windows.
+- Decision line in the widget annotates per-token billing with `(per-token)` for immediate transparency.
+
+### Changed
+
+- `buildWidgetLines` now requires the routed `decision` (or `undefined` when no decision exists) so the current provider can be identified for scoped widget rendering.
+
+
 ## [0.4.0] - 2026-08-10
-
 ### Added
-
 - Subscription-first candidate ordering: within a partition bucket, subscription-billed candidates now outrank per-token ones, so paid quota is spent before metered balance. A per-token candidate only takes the lead when the subscription candidate's rolling latency crosses an absolute usability bar (`SUBSCRIPTION_LATENCY_MAX_MS`, 60s) and is worse than the metered candidate. Relative latency is deliberately ignored across billing groups: the tracked latency is total stream duration, which confounds model speed with response length, so ratio comparisons would dethrone slower-but-healthy subscription models almost permanently.
 
 ### Fixed

@@ -259,10 +259,17 @@ describe("background quota refresh", () => {
 				},
 			});
 			state.ctx = ctx;
+			// Widget shows the current provider only — seed the decision that
+			// identifies it (request path sets this; the refresh tick reuses it).
+			state.lastDecision = {
+				at: Date.now(),
+				cleanPrompt: "hi",
+				decision: { profile: "main", tier: "standard", target: { provider: "anthropic", model: "sonnet" } } as never,
+			};
 
 			await refreshQuotaAndRender({ current: state }, api);
 			expect(state.quotaCache.data).toHaveLength(1);
-			expect(widgetCalls).toEqual([["uvi: anthropic 75% left"]]);
+			expect(widgetCalls).toEqual([["main | tier=standard | anthropic/sonnet", "uvi: anthropic 75% left"]]);
 
 			// Same data → no redundant widget render.
 			await refreshQuotaAndRender({ current: state }, api);
@@ -272,7 +279,7 @@ describe("background quota refresh", () => {
 			usedFraction = 0.5;
 			await refreshQuotaAndRender({ current: state }, api);
 			expect(widgetCalls).toHaveLength(2);
-			expect(widgetCalls[1]).toEqual(["uvi: anthropic 50% left"]);
+			expect(widgetCalls[1]).toEqual(["main | tier=standard | anthropic/sonnet", "uvi: anthropic 50% left"]);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

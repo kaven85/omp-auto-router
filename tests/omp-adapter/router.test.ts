@@ -30,7 +30,7 @@ const { refreshModels } = await import("../../src/omp-adapter/state");
 const { CircuitBreaker } = await import("../../src/core/circuit-breaker");
 const { MockExtensionApi } = await import("./mock-omp");
 import type { OmpModel } from "../../src/omp-adapter/omp-api";
-import type { RouterConfig } from "../../src/core/types";
+import type { RouterConfig, RoutingDecision } from "../../src/core/types";
 
 const CONFIG: RouterConfig = {
 	active: "premium",
@@ -889,6 +889,14 @@ function errorText(event: { type: string; [k: string]: unknown }): string {
 }
 
 describe("widget rendering", () => {
+	/** Minimal decision fixture — only the fields buildWidgetLines reads. */
+	const decisionFor = (provider: string, billing?: "subscription" | "per-token") =>
+		({
+			profile: "main",
+			tier: "standard",
+			target: { provider, model: "m", ...(billing !== undefined ? { billing } : {}) },
+		}) as unknown as RoutingDecision;
+
 	test("uvi window past resetsAt renders as freshly reset", () => {
 		const { state, dir } = setup();
 		state.quotaCache = {
@@ -906,20 +914,94 @@ describe("widget rendering", () => {
 				},
 			],
 		};
-		const lines = buildWidgetLines(state);
-		expect(lines).toEqual(["uvi: roll-a 100% left · roll-b 20% left"]);
+		// Widget shows only the current provider's balance.
+		expect(buildWidgetLines(state, decisionFor("roll-a"))).toEqual([
+			"main | tier=standard | roll-a/m",
+			"uvi: roll-a 100% left",
+		]);
+		expect(buildWidgetLines(state, decisionFor("roll-b"))).toEqual([
+			"main | tier=standard | roll-b/m",
+			"uvi: roll-b 20% left",
+		]);
 		rmSync(dir, { recursive: true, force: true });
 	});
 
-	test("without a decision the widget shows status lines only", () => {
+	test("without a decision the widget omits the uvi line", () => {
 		const { state, dir } = setup();
 		state.quotaCache = {
 			at: Date.now(),
 			data: [{ provider: "solo-p", fetchedAt: Date.now(), windows: [{ id: "7d", usedFraction: 0.5 }] }],
 		};
-		const lines = buildWidgetLines(state);
-		expect(lines).toEqual(["uvi: solo-p 50% left"]);
+		expect(buildWidgetLines(state)).toEqual([]);
+		expect(buildWidgetLines(state, decisionFor("solo-p"))).toEqual([
+			"main | tier=standard | solo-p/m",
+			"uvi: solo-p 50% left",
+		]);
 		rmSync(dir, { recursive: true, force: true });
+	});
+	test("widget renders a balance line for balance-capable providers without windows", () => {
+		const { state, dir } = setup();
+		// deepseek is balance-capable: no usage windows, but a cached wallet.
+		state.balanceCache = { deepseek: { currency: "USD", total: "12.34" } };
+		expect(buildWidgetLines(state, decisionFor("deepseek"))).toEqual([
+			"main | tier=standard | deepseek/m",
+			"balance: deepseek 12.34 USD",
+		]);
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("widget annotates a per-token decision's wallet type", () => {
+		const { state, dir } = setup();
+		state.quotaCache = {
+			at: Date.now(),
+			data: [{ provider: "wt-p", fetchedAt: Date.now(), windows: [{ id: "7d", usedFraction: 0.3 }] }],
+		};
+		// per-token is annotated; default subscription is not.
+		expect(buildWidgetLines(state, decisionFor("wt-p", "per-token"))).toEqual([
+			"main | tier=standard | wt-p/m (per-token)",
+			"uvi: wt-p 70% left",
+		]);
+		expect(buildWidgetLines(state, decisionFor("wt-p", "subscription"))).toEqual([
+			"main | tier=standard | wt-p/m",
+			"uvi: wt-p 70% left",
+		]);
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("request path fetches and caches the routed provider's balance for the widget", async () => {
+		const { api, state, ctx, dir } = setup();
+		streamBehavior = async function* () {
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		// Balance endpoint answers the DeepSeek shape; the quota cache is
+		// refreshed earlier in the same request, so the balance must still
+		// be fetched (regression: the old throttle keyed off quotaCache.at,
+		// which the request had just bumped, making the fetch unreachable).
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = (async (_url: unknown, init?: { headers?: Record<string, string> }) => {
+			expect(init?.headers?.Authorization).toBe("Bearer test-key");
+			return new Response(JSON.stringify({ balance_infos: [{ currency: "USD", total_balance: "8.25" }] }), {
+				status: 200,
+			});
+		}) as typeof fetch;
+		try {
+			state.ctx = ctx;
+			const handler = createStreamHandler(state, api, {
+				model: { provider: "auto-router", id: "premium" },
+				context: contextWithPrompt("hi"),
+				options: {},
+			});
+			for await (const _event of handler) { /* drain */ }
+			const decision = state.lastDecision?.decision;
+			expect(decision?.target.provider).toBe("deepseek");
+			// The routed provider's wallet landed in the cache...
+			expect(state.balanceCache["deepseek"]).toEqual({ currency: "USD", total: "8.25" });
+			// ...and shows up in the widget.
+			expect(buildWidgetLines(state, decision)).toContain("balance: deepseek 8.25 USD");
+		} finally {
+			globalThis.fetch = originalFetch;
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	test("renderWidget suppresses identical re-renders", () => {
@@ -930,17 +1012,18 @@ describe("widget rendering", () => {
 		};
 		const calls: string[][] = [];
 		const host = { setWidget: (lines: string[]) => calls.push(lines) };
-		renderWidget(state, host);
-		renderWidget(state, host);
+		const decision = decisionFor("dedupe-p");
+		renderWidget(state, host, decision);
+		renderWidget(state, host, decision);
 		expect(calls).toHaveLength(1);
 		// Fresh data changes the payload → renders again.
 		state.quotaCache = {
 			at: Date.now(),
 			data: [{ provider: "dedupe-p", fetchedAt: Date.now(), windows: [{ id: "7d", usedFraction: 0.5 }] }],
 		};
-		renderWidget(state, host);
+		renderWidget(state, host, decision);
 		expect(calls).toHaveLength(2);
-		expect(calls[1]).toEqual(["uvi: dedupe-p 50% left"]);
+		expect(calls[1]).toEqual(["main | tier=standard | dedupe-p/m", "uvi: dedupe-p 50% left"]);
 		rmSync(dir, { recursive: true, force: true });
 	});
 });

@@ -25,7 +25,7 @@ import type { AdapterState } from "./state";
 import { persistTrackers } from "./state";
 import { enrichCandidates, createHostPorts, quotaRefreshMs } from "./host-ports";
 import type { OmpExtensionApi, OmpExtensionContext } from "./omp-api";
-import { resolveThinkingCap } from "./provider-registry";
+import { fetchProviderBalance, resolveBalanceEndpoint, resolveThinkingCap } from "./provider-registry";
 import { redactSecrets } from "./redact";
 
 /** Transient exclusion window after a target fails within a failover chain. */
@@ -77,8 +77,9 @@ const TIER_LADDER = ["trivial", "simple", "standard", "complex"] as const;
 export function buildWidgetLines(state: AdapterState, decision?: RoutingDecision): string[] {
 	const lines: string[] = [];
 	if (decision !== undefined) {
+		const billing = decision.target.billing === "per-token" ? " (per-token)" : "";
 		lines.push(
-			`${decision.profile} | tier=${decision.tier} | ${decision.target.provider}/${decision.target.model}${decision.thinking !== undefined ? ` | ${decision.thinking}` : ""}`,
+			`${decision.profile} | tier=${decision.tier} | ${decision.target.provider}/${decision.target.model}${billing}${decision.thinking !== undefined ? ` | ${decision.thinking}` : ""}`,
 		);
 	}
 	const budgetBits: string[] = [];
@@ -93,18 +94,25 @@ export function buildWidgetLines(state: AdapterState, decision?: RoutingDecision
 		.filter(([, rec]) => Date.now() - rec.openedAt < rec.cooldownMs)
 		.map(([key, rec]) => `${key} (${rec.consecutiveFailures}x)`);
 	if (openCircuits.length > 0) lines.push(`circuit open: ${openCircuits.join(" · ")}`);
-	if (state.uviEnabled && state.quotaCache.data.length > 0) {
+	// UVI quota pacing: only the current provider's balance — the full
+	// per-provider breakdown lives in `/auto-router usage`.
+	const currentProvider = decision?.target.provider;
+	if (state.uviEnabled && currentProvider !== undefined) {
 		const nowMs = Date.now();
-		const uviBits = state.quotaCache.data.map((snapshot) => {
-			const worst = Math.max(
-				0,
-				...snapshot.windows.map((window) =>
-					window.resetsAt !== undefined && window.resetsAt <= nowMs ? 0 : window.usedFraction,
-				),
-			);
-			return `${snapshot.provider} ${(100 - worst * 100).toFixed(0)}% left`;
-		});
-		lines.push(`uvi: ${uviBits.join(" · ")}`);
+		const uviBits = state.quotaCache.data
+			.filter((snapshot) => snapshot.provider === currentProvider)
+			.map((snapshot) => {
+				const worst = Math.max(
+					0,
+					...snapshot.windows.map((window) =>
+						window.resetsAt !== undefined && window.resetsAt <= nowMs ? 0 : window.usedFraction,
+					),
+				);
+				return `${snapshot.provider} ${(100 - worst * 100).toFixed(0)}% left`;
+			});
+		if (uviBits.length > 0) lines.push(`uvi: ${uviBits.join(" · ")}`);
+		const balance = state.balanceCache[currentProvider];
+		if (balance !== undefined) lines.push(`balance: ${currentProvider} ${balance.total} ${balance.currency}`);
 	}
 	return lines;
 }
@@ -439,6 +447,22 @@ export function createStreamHandler(
 		host.setStatus(
 			`auto-router ${decision.profile} | tier=${decision.tier} (${decision.confidence.toFixed(2)}) | ${decision.target.provider}/${decision.target.model}${decision.thinking !== undefined ? ` | thinking=${decision.thinking}` : ""}`,
 		);
+		// Balance-capable providers (e.g. deepseek) surface their wallet via the
+		// balance API, not usage-report windows — fetch + cache it so the widget
+		// can show the current provider's remaining balance. Throttled on its own
+		// clock (balanceAt), never on the quota cache — the quota cache is
+		// refreshed earlier in this same request, so coupling to its staleness
+		// would make the balance fetch unreachable.
+		const balanceProvider = decision.target.provider;
+		const balanceEndpoint =
+			state.uviEnabled && Date.now() - state.balanceAt >= quotaRefreshMs()
+				? resolveBalanceEndpoint(balanceProvider, allTargets)
+				: undefined;
+		if (balanceEndpoint !== undefined) {
+			const balance = await fetchProviderBalance(ctx, state, balanceProvider, balanceEndpoint);
+			state.balanceAt = Date.now();
+			if (balance !== undefined) state.balanceCache[balanceProvider] = balance;
+		}
 		renderWidget(state, host, decision);
 
 		// Strip the router tokens before the model ever sees the prompt.

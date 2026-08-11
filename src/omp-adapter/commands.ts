@@ -602,6 +602,11 @@ async function runCommand(rawArgs: string, deps: CommandDeps, ctx: OmpExtensionC
 			const balances = new Map<string, ProviderBalance | undefined>(
 				balanceProviders.map((provider, index) => [provider, fetchedBalances[index]]),
 			);
+			// Mirror fetched balances into the widget cache so both surfaces
+			// stay consistent without a redundant balance API call.
+			for (const [provider, balance] of balances) {
+				if (balance !== undefined) state.balanceCache[provider] = balance;
+			}
 
 			const modelRows = slice.map(([key, count]) => {
 				const cost = state.sessionUsage.cost.get(key) ?? 0;
