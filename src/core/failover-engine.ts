@@ -134,7 +134,9 @@ export function defaultIsRetryable(error: unknown): boolean {
  * through untouched. When every candidate fails, throws an Error whose
  * message carries the attempted target chain, with the last error as `cause`.
  * An aborted `opts.signal` stops cleanly between candidates; AbortError
- * failures are rethrown.
+ * failures are rethrown and `{type:"error", reason:"aborted"}` terminal events
+ * stop the chain cleanly — neither is recorded as a target failure, so a user
+ * abort never cools a target down.
  *
  * @throws when `candidates` is empty (programmer error).
  */
@@ -229,8 +231,10 @@ export async function* failoverStream(
 			return;
 		}
 
-		lastError = failedError;
-		hooks.onTargetFailed?.(target, failedError);
+		// Aborts are not target health signals: a user/host abort surfaces as a
+		// thrown AbortError or a {type:"error", reason:"aborted"} terminal event,
+		// and neither may be recorded as a failure (cooldown/circuit) — an Esc
+		// would otherwise freeze the target for minutes.
 		if (
 			typeof failedError === "object" &&
 			failedError !== null &&
@@ -239,6 +243,11 @@ export async function* failoverStream(
 		) {
 			throw failedError; // host abort wins over retryability
 		}
+		if (failedEvent !== undefined && failedEvent.reason === "aborted") {
+			return; // clean stop, mirroring the between-candidates abort path
+		}
+		lastError = failedError;
+		hooks.onTargetFailed?.(target, failedError);
 
 		const retryable = hooks.isRetryable(failedError);
 		const next = candidates[index + 1];

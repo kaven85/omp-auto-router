@@ -246,6 +246,40 @@ describe("failoverStream", () => {
 		expect(failovers).toEqual([]);
 	});
 
+	test("AbortError is not recorded as a target failure (no cooldown on user abort)", async () => {
+		const a = target("a");
+		const abortError = new DOMException("The operation was aborted", "AbortError");
+		const factory: StreamFactory = () => {
+			throw abortError;
+		};
+		const { hooks, failed } = recordingHooks();
+
+		await expect(collect(failoverStream([a], factory, hooks))).rejects.toBe(abortError);
+		expect(failed).toEqual([]);
+	});
+
+	test("aborted terminal error event stops cleanly without recording a failure", async () => {
+		// pi-ai ends an Esc-aborted stream with {type:"error", reason:"aborted"} —
+		// a user abort must not cool the target down or fail over.
+		const a = target("a");
+		const b = target("b");
+		const factoryCalls: string[] = [];
+		const factory: StreamFactory = (t) => {
+			factoryCalls.push(t.provider);
+			return streamOf([
+				{ type: "thinking_delta", delta: "hmm" },
+				{ type: "error", reason: "aborted", error: { stopReason: "aborted" } },
+			]);
+		};
+		const { hooks, failed, failovers } = recordingHooks();
+
+		const out = await collect(failoverStream([a, b], factory, hooks));
+		expect(out).toEqual([]);
+		expect(factoryCalls).toEqual(["a"]); // no failover to b
+		expect(failed).toEqual([]);
+		expect(failovers).toEqual([]);
+	});
+
 	test("empty candidate chain is a programmer error", async () => {
 		const factory: StreamFactory = () => streamOf([]);
 		const { hooks } = recordingHooks();
