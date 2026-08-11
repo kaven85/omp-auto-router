@@ -1,4 +1,4 @@
-import { describe, expect, test, mock } from "bun:test";
+import { describe, expect, test, mock, afterEach } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,7 +24,7 @@ mock.module("@oh-my-pi/pi-ai/error", () => ({
 	isProviderRetryableError: (error: unknown) => retryableBehavior(error),
 }));
 
-const { createStreamHandler, buildWidgetLines, renderWidget, waitForSessionContext } = await import("../../src/omp-adapter/router");
+const { createStreamHandler, buildWidgetLines, renderWidget, waitForSessionContext, cooldownAfterFailureMs } = await import("../../src/omp-adapter/router");
 const { createAdapterState } = await import("../../src/omp-adapter/state");
 const { refreshModels } = await import("../../src/omp-adapter/state");
 const { CircuitBreaker } = await import("../../src/core/circuit-breaker");
@@ -934,6 +934,68 @@ describe("adapter router (Mode A)", () => {
 		expect(errorText(events[0]!)).toContain("no eligible candidates");
 		expect(streamCalls).toEqual([]);
 		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("cooldown exclusion names the layer and the failure that caused it", async () => {
+		const { api, state, ctx, dir } = setup();
+		// Every complex-tier target throws a retryable plain-object error, so
+		// both end up cooled with the real provider message recorded.
+		streamBehavior = async function* () {
+			throw { status: 429, error: { type: "rate_limit_error", message: "rate limit reached, retry after 30s" } };
+		};
+		const context = contextWithPrompt("@reasoning hard problem");
+		state.ctx = ctx;
+		const first = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context,
+			options: {},
+		});
+		await expect(
+			(async () => {
+				for await (const _event of first) {
+					// drain
+				}
+			})(),
+		).rejects.toThrow(/all \d+ candidate\(s\) failed/);
+		expect(state.cooldowns.size).toBe(2);
+
+		// Second request: both targets cooling → actionable layered error.
+		const second = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context: contextWithPrompt("@reasoning hard problem"),
+			options: {},
+		});
+		const events: Array<{ type: string; [k: string]: unknown }> = [];
+		for await (const event of second) events.push(event);
+		expect(events).toHaveLength(1);
+		expect(events[0]!.type).toBe("error");
+		const text = errorText(events[0]!);
+		expect(text).toContain("auto-router [constraint-solver]: no eligible candidates");
+		expect(text).toContain("cooling down until");
+		expect(text).toContain("last failure: rate limit reached, retry after 30s [status 429]");
+		expect(streamCalls).toHaveLength(2); // only the first request's attempts
+		rmSync(dir, { recursive: true, force: true });
+	});
+});
+
+describe("cooldownAfterFailureMs", () => {
+	const ENV = "OMP_AUTO_ROUTER_COOLDOWN_MS";
+	afterEach(() => {
+		delete process.env[ENV];
+	});
+
+	test("defaults to 60s without the env override", () => {
+		delete process.env[ENV];
+		expect(cooldownAfterFailureMs()).toBe(60_000);
+	});
+
+	test("honors a valid override and floors at 5s", () => {
+		process.env[ENV] = "15000";
+		expect(cooldownAfterFailureMs()).toBe(15_000);
+		process.env[ENV] = "1000";
+		expect(cooldownAfterFailureMs()).toBe(60_000);
+		process.env[ENV] = "not-a-number";
+		expect(cooldownAfterFailureMs()).toBe(60_000);
 	});
 });
 

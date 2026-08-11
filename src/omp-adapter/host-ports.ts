@@ -168,7 +168,7 @@ function wrapModel(model: OmpModel): HostModel {
 export function enrichCandidates(
 	host: HostPorts,
 	targets: RouteTarget[],
-	cooldowns?: ReadonlyMap<string, number>,
+	cooldowns?: ReadonlyMap<string, { until: number; reason: string }>,
 ): CandidateInfo[] {
 	const seen = new Set<string>();
 	const out: CandidateInfo[] = [];
@@ -178,13 +178,15 @@ export function enrichCandidates(
 		if (seen.has(key)) continue;
 		seen.add(key);
 		const model = host.resolveModel(key);
-		const cooldownUntil = cooldowns?.get(key);
+		const cooldown = cooldowns?.get(key);
 		out.push({
 			target,
 			key,
 			...(model ? { capabilities: model.capabilities } : {}),
 			healthy: host.isHealthy(target),
-			...(cooldownUntil !== undefined && cooldownUntil > nowMs ? { cooldownUntil } : {}),
+			...(cooldown !== undefined && cooldown.until > nowMs
+				? { cooldownUntil: cooldown.until, cooldownReason: cooldown.reason }
+				: {}),
 		});
 	}
 	return out;

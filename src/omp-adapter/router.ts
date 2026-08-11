@@ -28,8 +28,20 @@ import type { OmpExtensionApi, OmpExtensionContext } from "./omp-api";
 import { fetchProviderBalance, resolveBalanceEndpoint, resolveThinkingCap } from "./provider-registry";
 import { redactSecrets } from "./redact";
 
-/** Transient exclusion window after a target fails within a failover chain. */
-const COOLDOWN_AFTER_FAILURE_MS = 5 * 60_000;
+/** Default transient exclusion window after a target fails within a failover chain. */
+const DEFAULT_COOLDOWN_AFTER_FAILURE_MS = 60_000;
+
+/**
+ * Effective post-failure cooldown: `OMP_AUTO_ROUTER_COOLDOWN_MS` env override,
+ * floored at 5s. Kept short by default — a cooled target with no fallback
+ * leaves the profile with no eligible candidates.
+ */
+export function cooldownAfterFailureMs(): number {
+	const raw = process.env.OMP_AUTO_ROUTER_COOLDOWN_MS;
+	if (raw === undefined) return DEFAULT_COOLDOWN_AFTER_FAILURE_MS;
+	const parsed = Number(raw);
+	return Number.isFinite(parsed) && parsed >= 5_000 ? parsed : DEFAULT_COOLDOWN_AFTER_FAILURE_MS;
+}
 
 /**
  * Rating feedback loop (demote-only): candidates with enough ratings and a
@@ -448,7 +460,7 @@ export function createStreamHandler(
 			const exclusions = decision.reasoning.filter((line) => line.startsWith("excluded "));
 			const detail = exclusions.length > 0 ? ` — ${exclusions.join("; ")}` : "";
 			yield* failWith(
-				`auto-router: no eligible candidates for profile "${profileName}" tier=${decision.tier}${detail}`,
+				`auto-router [constraint-solver]: no eligible candidates for profile "${profileName}" tier=${decision.tier}${detail}`,
 			);
 			return;
 		}
@@ -505,8 +517,9 @@ export function createStreamHandler(
 				state.circuit.recordFailure(key, Date.now());
 				// Transient cooldown: the solver excludes the target for a few
 				// minutes so subsequent requests skip it instead of rediscovering
-				// the failure on every prompt.
-				state.cooldowns.set(key, Date.now() + COOLDOWN_AFTER_FAILURE_MS);
+				// the failure on every prompt. The reason is surfaced in the
+				// "no eligible candidates" error so the cause stays visible.
+				state.cooldowns.set(key, { until: Date.now() + cooldownAfterFailureMs(), reason: formatError(error) });
 				state.eventLog.append({
 					type: "error",
 					at: Date.now(),

@@ -154,6 +154,8 @@ export interface CandidateInfo {
 	healthy: boolean;
 	/** Cooldown expiry (epoch ms); undefined = not cooling down. */
 	cooldownUntil?: number;
+	/** Why the cooldown was imposed (last failure, human-readable). */
+	cooldownReason?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

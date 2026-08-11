@@ -20,7 +20,7 @@
 - **影子模式**：照记决策但按配置顺序路由，对比验证
 - **可解释**：`/auto-router explain` 输出完整推理链与链上候选评分；决策/用量 JSONL 落盘
 - **跨重启记忆**：熔断器状态与首个可见输出延迟滚动均值持久化（`circuit.json` / `first-output-latency.json`），重启后 warm-start
-- **环境开关**：`OMP_AUTO_ROUTER_UVI_HARD=1`（stressed UVI 直接排除）、`OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>`（分类置信度阈值，默认 0.45）、`OMP_AUTO_ROUTER_QUOTA_REFRESH_MS=<ms>`（配额刷新节奏，默认 30000，下限 10000）
+- **环境开关**：`OMP_AUTO_ROUTER_UVI_HARD=1`（stressed UVI 直接排除）、`OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>`（分类置信度阈值，默认 0.45）、`OMP_AUTO_ROUTER_QUOTA_REFRESH_MS=<ms>`（配额刷新节奏，默认 30000，下限 10000）、`OMP_AUTO_ROUTER_COOLDOWN_MS=<ms>`（失败后目标冷却时长，默认 60000，下限 5000）
 - **后台配额刷新**：session 启动后每 30s 后台刷新 UVI 配额（host managed timer），请求路径不再因缓存过期而阻塞
 - **仪表盘 widget**：决策后渲染 profile/目标/首个可见输出延迟/预算/熔断/UVI 概览；后台刷新落地后立即重渲染，已过 resetsAt 的配额窗口按已重置显示，内容无变化时不重复渲染（host 无 setWidget 时自动降级）
 - **Provider registry**：provider 专属知识（Kimi 窗口标签、DeepSeek 余额端点、模型 thinking 强度范围）集中在 `provider-registry.ts`；target 级 `balanceEndpoint` / `thinkingCap` 可覆盖默认
@@ -462,7 +462,7 @@ tail ~/.omp/agent/auto-router/auto-router.events.jsonl
 
 - 虚拟模型元数据（contextWindow 等）为静态值，仅影响 `/model` 展示
 - 多会话（RPC）下 ctx 为进程级单例，按"单活动会话"假设运行
-- `OMP_AUTO_ROUTER_UVI_HARD` / `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD` / `OMP_AUTO_ROUTER_QUOTA_REFRESH_MS` 环境开关已支持；其余 `OMP_AUTO_ROUTER_*` 开关尚未实现
+- `OMP_AUTO_ROUTER_UVI_HARD` / `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD` / `OMP_AUTO_ROUTER_QUOTA_REFRESH_MS` / `OMP_AUTO_ROUTER_COOLDOWN_MS` 环境开关已支持；其余 `OMP_AUTO_ROUTER_*` 开关尚未实现
 - 插件包尚未走 omp 市场/`omp install` 安装形态（当前为目录引用）
 
 ## 开发

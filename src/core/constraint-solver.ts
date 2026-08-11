@@ -72,7 +72,8 @@ function exclusionReason(
 		return `${key}: unhealthy (host auth/health check failed)`;
 	}
 	if (candidate.cooldownUntil !== undefined && candidate.cooldownUntil > opts.nowMs) {
-		return `${key}: cooling down until ${new Date(candidate.cooldownUntil).toISOString()}`;
+		const cause = candidate.cooldownReason !== undefined ? ` (last failure: ${candidate.cooldownReason})` : "";
+		return `${key}: cooling down until ${new Date(candidate.cooldownUntil).toISOString()}${cause}`;
 	}
 	if (opts.circuit.state(key, opts.nowMs) === "open") {
 		return `${key}: circuit breaker open`;

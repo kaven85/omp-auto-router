@@ -61,6 +61,16 @@ describe("solveConstraints health / cooldown / circuit gates", () => {
 		expect(excluded[0]?.reason).toContain("cooling down");
 	});
 
+	test("cooldown exclusion carries the failure that caused it", () => {
+		const cooling = candidate("p", "cooling", {
+			cooldownUntil: NOW + 1_000,
+			cooldownReason: "rate limit reached [status 429]",
+		});
+		const { excluded } = solveConstraints([cooling], {}, { circuit: freshCircuit(), nowMs: NOW });
+		expect(excluded[0]?.reason).toContain("cooling down until");
+		expect(excluded[0]?.reason).toContain("last failure: rate limit reached [status 429]");
+	});
+
 	test("open circuit excludes; half-open and closed pass", () => {
 		const circuit = freshCircuit();
 		for (let i = 0; i < 3; i++) circuit.recordFailure("p/open", NOW - 10_000);

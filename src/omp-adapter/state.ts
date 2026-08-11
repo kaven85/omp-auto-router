@@ -85,8 +85,8 @@ export interface AdapterState {
 	balanceAt: number;
 	/** Throttled per-provider balance cache (balance-capable providers only). */
 	balanceCache: Record<string, ProviderBalance>;
-	/** "provider/model" → epoch ms until which the target is excluded (transient cooldown after failure). */
-	cooldowns: Map<string, number>;
+	/** "provider/model" → transient post-failure exclusion (expiry + the failure that caused it). */
+	cooldowns: Map<string, { until: number; reason: string }>;
 	/** Epoch ms of the most recent test/build tool failure; drives temporary tier escalation. */
 	testFailureAt: number | undefined;
 	/** User ratings of routing decisions. */

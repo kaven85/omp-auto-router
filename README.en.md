@@ -20,7 +20,7 @@ Ported from the design ideas of [pi-auto-router](https://github.com/danialranjha
 - **Shadow mode**: record decisions but route by configured order, for comparison and validation
 - **Explainable**: `/auto-router explain` prints the full reasoning chain plus per-candidate ratings; decisions/usage are persisted as JSONL
 - **Restart memory**: circuit-breaker state and rolling first-visible-output latency persist (`circuit.json` / `first-output-latency.json`) for warm starts
-- **Env switches**: `OMP_AUTO_ROUTER_UVI_HARD=1` (exclude stressed-UVI providers), `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>` (classifier confidence gate, default 0.45)
+- **Env switches**: `OMP_AUTO_ROUTER_UVI_HARD=1` (exclude stressed-UVI providers), `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>` (classifier confidence gate, default 0.45), `OMP_AUTO_ROUTER_COOLDOWN_MS=<ms>` (post-failure target cooldown, default 60000, floor 5000)
 - **Background quota refresh**: UVI quota snapshots refresh every 30s in the background (host-managed timer), so requests never block on an expired cache
 - **Dashboard widget**: after each decision a profile/target/first-visible-output latency/budget/circuit/UVI overview is rendered via `setWidget` (degrades silently when the host lacks it)
 - **Provider registry**: provider-specific knowledge (Kimi window labels, DeepSeek balance endpoint, per-model thinking ranges) lives in `provider-registry.ts`; target-level `balanceEndpoint` / `thinkingCap` override the defaults
@@ -461,7 +461,7 @@ Budget/rating persistence: `~/.omp/agent/auto-router/budget-usage.json`, `budget
 
 - Virtual model metadata (contextWindow etc.) is static; only affects `/model` display
 - Under multi-session (RPC), ctx is a process-level singleton; the plugin assumes a "single active session"
-- `OMP_AUTO_ROUTER_UVI_HARD` / `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD` are supported; other `OMP_AUTO_ROUTER_*` switches are not implemented yet
+- `OMP_AUTO_ROUTER_UVI_HARD` / `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD` / `OMP_AUTO_ROUTER_QUOTA_REFRESH_MS` / `OMP_AUTO_ROUTER_COOLDOWN_MS` are supported; other `OMP_AUTO_ROUTER_*` switches are not implemented yet
 - The plugin is not yet distributed via the omp marketplace / `omp install` (currently referenced as a directory)
 
 ## Development
