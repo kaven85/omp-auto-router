@@ -39,6 +39,8 @@ export interface RouteTarget {
 	billing?: Billing;
 	/** Optional custom balance API URL for per-token providers. */
 	balanceEndpoint?: string;
+	/** Thinking level for this target; overrides the selected tier's thinking. */
+	thinking?: ThinkingLevel;
 	/** Thinking levels this model accepts; overrides the provider registry default. */
 	thinkingCap?: ThinkingCap;
 }
@@ -263,6 +265,13 @@ export interface ComplexitySignals {
 	codeSignals: string[];
 	/** Repair / debug phrasing that demands reasoning over existing code. */
 	repairDebug: boolean;
+	/** Code-implementation phrasing; demotes soft planning words from complex. */
+	implementation: boolean;
+	/**
+	 * Both planning and implementation phases detected (e.g. "设计并实现 X").
+	 * Semantically ambiguous — the adapter may ask an LLM to adjudicate.
+	 */
+	mixedPhase: boolean;
 	multiStep: boolean;
 	/** Mechanical operation (commit/push/deploy/…) needing execution, not design. */
 	mechanicalOp: boolean;
@@ -323,7 +332,7 @@ export interface RoutingDecision {
 	target: RouteTarget;
 	/** Full failover order after partitioning. */
 	orderedCandidates: RouteTarget[];
-	/** Thinking level from the tier config, if set. */
+	/** Effective thinking for the selected target: target override, else tier config. */
 	thinking?: ThinkingLevel;
 	reasoning: string[];
 	estimatedTokens: number;

@@ -21,6 +21,8 @@ function makeDecision(decidedAt: number, profile = "default"): RoutingDecision {
 					estimatedTokens: 100,
 					codeSignals: [],
 					repairDebug: false,
+					implementation: false,
+					mixedPhase: false,
 					multiStep: false,
 					mechanicalOp: false,
 					shortQa: false,

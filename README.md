@@ -20,7 +20,7 @@
 - **影子模式**：照记决策但按配置顺序路由，对比验证
 - **可解释**：`/auto-router explain` 输出完整推理链与链上候选评分；决策/用量 JSONL 落盘
 - **跨重启记忆**：熔断器状态与首个可见输出延迟滚动均值持久化（`circuit.json` / `first-output-latency.json`），重启后 warm-start
-- **环境开关**：`OMP_AUTO_ROUTER_UVI_HARD=1`（stressed UVI 直接排除）、`OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>`（分类置信度阈值，默认 0.45）、`OMP_AUTO_ROUTER_QUOTA_REFRESH_MS=<ms>`（配额刷新节奏，默认 30000，下限 10000）、`OMP_AUTO_ROUTER_COOLDOWN_MS=<ms>`（失败后目标冷却时长，默认 60000，下限 5000）
+- **环境开关**：`OMP_AUTO_ROUTER_UVI_HARD=1`（stressed UVI 直接排除）、`OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>`（分类置信度阈值，默认 0.45）、`OMP_AUTO_ROUTER_QUOTA_REFRESH_MS=<ms>`（配额刷新节奏，默认 30000，下限 10000）、`OMP_AUTO_ROUTER_COOLDOWN_MS=<ms>`（失败后目标冷却时长，默认 60000，下限 5000）、`OMP_AUTO_ROUTER_LLM_ADJUDICATE=0`（关闭混合阶段提示词的 LLM 仲裁，默认开启）
 - **后台配额刷新**：session 启动后每 30s 后台刷新 UVI 配额（host managed timer），请求路径不再因缓存过期而阻塞
 - **仪表盘 widget**：决策后渲染 profile/目标/首个可见输出延迟/预算/熔断/UVI 概览；后台刷新落地后立即重渲染，已过 resetsAt 的配额窗口按已重置显示，内容无变化时不重复渲染（host 无 setWidget 时自动降级）
 - **Provider registry**：provider 专属知识（Kimi 窗口标签、DeepSeek 余额端点、模型 thinking 强度范围）集中在 `provider-registry.ts`；target 级 `balanceEndpoint` / `thinkingCap` 可覆盖默认
@@ -236,7 +236,8 @@ activate:                           # 按 cwd 前缀自动激活
 | `label` | string | 否 | 展示标签 |
 | `billing` | `subscription/per-token` | 否 | 缺省 `subscription`；影响预算桶与合成 UVI |
 | `balanceEndpoint` | string | 否 | 自定义余额 API（per-token 提供商）；覆盖 provider registry 内置默认（deepseek），响应接受 deepseek 或 `{currency, total_balance}` 形状，余额显示在 `/auto-router usage` |
-| `thinkingCap` | `{min?, max?}` | 否 | 该模型接受的 thinking 强度范围（含端点）；覆盖 provider registry 内置默认。tier 配置的 thinking 超出范围时会被钳制到范围内再下发，并记一条 `warn` 事件。例：`deepseek-v4-pro` 内置 `{min: high}`（只接受 high/max，拒绝 low/medium） |
+| `thinking` | `off/minimal/low/medium/high/xhigh/max` | 否 | 覆盖所属 tier 的 `thinking`；failover 到该 target 时按此值下发 |
+| `thinkingCap` | `{min?, max?}` | 否 | 该模型接受的 thinking 强度范围（含端点）；覆盖 provider registry 内置默认。tier/target 配置的 thinking 超出范围时会被钳制到范围内再下发，并记一条 `warn` 事件。例：`deepseek-v4-pro` 内置 `{min: high}`（只接受 high/max，拒绝 low/medium） |
 
 凭证走 omp 的 auth 链（`agent.db` 多凭证），**无需**在配置里写密钥。
 
@@ -301,8 +302,10 @@ activate:                           # 按 cwd 前缀自动激活
 ## 启用路由
 
 ```text
-/model            → 选择 Auto Router: <profile>（即 auto-router/<profile>）
+/model 或 /switch auto-router/<profile>
+  → 选择 Auto Router: <profile>（例如 /switch auto-router/company）
 ```
+`/switch newapi/gpt-5.5` 会绕过插件，直接进入 OMP 内置的 NewAPI transport。该直连模型的请求协议由 OMP 的模型目录（`models.yml` 的静态模型记录 / provider discovery）决定，不是 auto-router target 的配置。
 
 或全局/按角色接管（`~/.omp/agent/config.yml`）：
 
@@ -321,8 +324,12 @@ modelRoles:
 |---|---|---|
 | `trivial` | 短问答、无代码 | thinking low |
 | `simple` | 单文件改动、解释、grep 类 | thinking low |
-| `standard` | 代码块、多文件路径、diff | thinking medium |
+| `standard` | 代码块、多文件路径、diff、实现类措辞 | thinking medium |
 | `complex` | 重构/迁移/架构关键词、长上下文、同任务多轮 | thinking high |
+
+> **拆分分析**：提示词按阶段连词（`并/然后/接着/随后/再`、`and/then`）和句末标点拆成阶段序列，**首阶段定层**——后续阶段轮到各自请求时再分类、层级随阶段流转。"帮我设计并实现一个登录功能" 首阶段是设计 → complex（实现那轮再落 standard，即 complex→standard）；"实现支付逻辑，然后设计对账方案" 首阶段是实现 → standard（设计那轮升 complex，即 standard→complex）；"按设计方案实现支付逻辑" 单阶段内含实现措辞（方案是既有产物）→ standard。硬性范围词（`重构/迁移/架构/跨文件`、`refactor/migrate/rewrite`）只在首阶段内计数。
+>
+> 混合阶段（首阶段内同时检测到规划措辞与实现措辞，如"按设计方案实现支付逻辑"）属语义难分场景：默认会再请**当前 LLM**（上次决策的目标模型；新会话则取 standard 层首选）做一次一词仲裁（trivial/simple/standard/complex），优先级为 钉层 > policy force-tier > LLM 仲裁 > 启发式分类。仲裁失败/超时/无法解析时回退启发式结果，不影响路由健康状态。`OMP_AUTO_ROUTER_LLM_ADJUDICATE=0` 可关闭。
 
 显式钉层（优先级最高，token 剥离）：
 
@@ -335,7 +342,7 @@ modelRoles:
 @profile:economy 临时切换 profile（单次请求）
 ```
 
-低置信（< 0.45）落到 `defaultTier`；同任务多轮粘性升级、不降级。
+低置信（< 0.45）落到 `defaultTier`；同任务多轮粘性升级、不降级——但干净的实现阶段（有实现措辞、无多步/排错信号）允许 complex→standard 降级，让层级随设计→实现的阶段流转。
 
 ### 各分级触发条件与触发词参考
 
@@ -355,6 +362,8 @@ refactor migrate migration redesign rearchitect re-architect overhaul rewrite
 across files  multiple files  cross-file  architecture
 ```
 
+> 其中 `方案/设计/规划/规格` 与英文整词 `plan/design/spec` 族是**软规划词**，只在首个任务内计数：当前任务同时含实现类措辞（见 `standard` 节）时被降级，否则推 complex。其余为硬范围词，在首个任务内始终推 complex。
+
 **多步词 —— 词边界匹配（英文整词，避免误伤 `planetary`/`specific`/`respect`）**
 ```
 plan plans planning planned          design designs designing
@@ -373,6 +382,16 @@ roadmap blueprint strategy decompose modularize modularise restructure
   bug debug debugging broken crash exception stack trace traceback runtime error
   why is  why does  why did  what's wrong  what is wrong
   报错 异常 崩溃 排查 定位问题 什么原因 为什么会 为什么报错
+  ```
+- 实现类措辞（升 standard；当前任务内的软规划词随之降级、不升 complex）：
+  ```
+  实现 开发 新增 添加 写个 写一个 做个 做一个 落地
+  ```
+  英文整词（词边界匹配）：
+  ```
+  implement implements implemented implementing implementation
+  build builds building  create creates creating  add adds adding
+  develop develops developing
   ```
 - code / analysis 意图（含 `实现`、`analyze`、`分析` 等意图词）但无结构信号
 - 上下文 32k–100k tokens（long）
@@ -416,6 +435,7 @@ roadmap blueprint strategy decompose modularize modularise restructure
 | `/auto-router uvi show\|enable\|disable\|refresh` | UVI 配额配速 | `/auto-router uvi show` |
 | `/auto-router shadow show\|enable\|disable` | 影子模式 | `/auto-router shadow enable` |
 | `/auto-router rate good\|bad [comment]` | 决策反馈（持久化） | `/auto-router rate good 选得好` |
+| `/auto-router rules [show]\|add\|remove <list> <词…>\|reset` | 查看/编辑复杂度判定规则（持久化，下一请求生效） | `/auto-router rules add mechanicalOp 同步数据` |
 | `/auto-router help` | 全部子命令的说明 + 示例 | `/auto-router help` |
 
 请求内钉层：`@fast` / `@swe` / `@reasoning` / `@long` / `@vision` / `@profile:<name>`（见上节）。

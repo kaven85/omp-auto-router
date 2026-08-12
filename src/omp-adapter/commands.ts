@@ -7,7 +7,15 @@
  */
 
 import type { QuotaSnapshot, QuotaWindow, RouteTarget } from "../core/types";
-import type { AdapterState } from "./state";
+import {
+	baseClassifierList,
+	CLASSIFIER_LIST_META,
+	CLASSIFIER_LIST_NAMES,
+	overridesEmpty,
+	type ClassifierListName,
+	type ClassifierOverrides,
+} from "../core/complexity-classifier";
+import { persistClassifierOverrides, type AdapterState } from "./state";
 import type { OmpAutocompleteItem, OmpExtensionApi, OmpExtensionContext } from "./omp-api";
 import { createHostPorts, quotaRefreshMs } from "./host-ports";
 import {
@@ -197,6 +205,7 @@ const SUBCOMMANDS: SubcommandHelp[] = [
 	{ sub: "uvi", usage: "show|enable|disable|refresh", description: "UVI 配额配速监控", example: "/auto-router uvi show" },
 	{ sub: "shadow", usage: "show|enable|disable", description: "影子模式（照记决策、按配置顺序路由）", example: "/auto-router shadow enable" },
 	{ sub: "rate", usage: "good|bad [comment]", description: "给上次决策打分（持久化，驱动反馈闭环）", example: "/auto-router rate good" },
+	{ sub: "rules", usage: "[show]|add|remove <list> <词…>|reset", description: "查看/编辑复杂度判定规则（trivial/simple/standard/complex）", example: "/auto-router rules add mechanicalOp 同步数据" },
 	{ sub: "usage", usage: "[page]", description: "本会话 settled 调用统计 + provider 接口余量（旧名 useage 仍可用）", example: "/auto-router usage 2" },
 	{ sub: "help", usage: "", description: "本帮助", example: "/auto-router help" },
 ];
@@ -221,6 +230,12 @@ const SUBCOMMAND_ACTIONS: Record<string, Array<{ action: string; usage: string; 
 	rate: [
 		{ action: "good", usage: "[comment]", description: "好评上次决策" },
 		{ action: "bad", usage: "[comment]", description: "差评上次决策" },
+	],
+	rules: [
+		{ action: "show", usage: "", description: "查看全部判定规则" },
+		{ action: "add", usage: "<list> <关键词…>", description: "向指定列表添加关键词" },
+		{ action: "remove", usage: "<list> <关键词…>", description: "从指定列表移除关键词（含内置）" },
+		{ action: "reset", usage: "", description: "清空全部自定义覆盖，还原内置" },
 	],
 };
 
@@ -261,6 +276,19 @@ function buildSubcommandItems(prefix: string): OmpAutocompleteItem[] | null {
 
 function buildNestedCompletions(sub: string, rest: string, deps: CommandDeps): OmpAutocompleteItem[] | null {
 	const [token = "", ...tail] = rest.split(/\s+/);
+
+	// rules add/remove <list>: complete the editable list name one level deeper.
+	if (sub === "rules" && (token === "add" || token === "remove") && tail.length === 1) {
+		const prefix = tail[0]!.toLowerCase();
+		const items = CLASSIFIER_LIST_NAMES.filter((n) => n.startsWith(prefix)).map((n) => ({
+			value: `rules ${token} ${n} `,
+			label: n,
+			description: CLASSIFIER_LIST_META[n].description,
+			hint: `→ ${CLASSIFIER_LIST_META[n].tier} (${CLASSIFIER_LIST_META[n].match})`,
+		}));
+		return items.length > 0 ? items : null;
+	}
+
 	if (tail.length > 0) return null; // past the action token — no completion
 
 	if (sub === "use" || sub === "show") {
@@ -313,6 +341,88 @@ function activeProfileName(state: AdapterState): string {
 		return current.id;
 	}
 	return state.registry.current();
+}
+
+/**
+ * Render the full complexity-classification rule surface: the five editable
+ * keyword lists (effective = builtin ± user overrides, additions marked `+`,
+ * removals hidden and counted) plus the fixed structural signals.
+ */
+export function formatClassifierRules(overrides: ClassifierOverrides): string {
+	const out: string[] = ["复杂度判定规则（trivial < simple < standard < complex，权重高者胜，平局取更高 tier）", ""];
+	for (const name of CLASSIFIER_LIST_NAMES) {
+		const meta = CLASSIFIER_LIST_META[name];
+		const removed = new Set((overrides.remove?.[name] ?? []).map((k) => k.toLowerCase()));
+		const builtin = baseClassifierList(name).filter((k) => !removed.has(k.toLowerCase()));
+		const added = overrides.add?.[name] ?? [];
+		out.push(`→ ${meta.tier}  ${name}  [${meta.match}, 权重 ${meta.weight}] ${meta.description}`);
+		out.push(`  ${[...builtin, ...added.map((k) => `${k} (+)`)].join(", ")}`);
+	}
+	out.push(
+		"",
+		"内置信号（不可编辑）:",
+		"  context 大小: <4k→trivial(w1) · 4k–32k→simple(w1) · 32k–100k→standard(w2) · ≥100k→complex(w3)",
+		"  code signals（文件路径/diff/stack-trace）→standard(w2) · code/analysis intent→standard(w1.5)",
+		"  拆分分析：按 并/然后/接着/再/and/then/句末标点 拆阶段，首阶段定层——设计并实现 X→complex（先设计），实现 X 然后设计 Y→standard（先实现），后续阶段轮到各自请求时再判；硬词（重构/迁移/架构/跨文件、refactor/migrate）只在首阶段内计数",
+		"  short Q&A（general intent, <200 tokens）→trivial(w1.5) · 图片输入→至少 simple(w1)",
+		"  sticky escalation: 会话内只升不降 · 钉层: @fast→simple @swe→standard @reasoning→complex",
+	);
+	if (!overridesEmpty(overrides)) {
+		const count = (m?: Partial<Record<ClassifierListName, string[]>>) =>
+			CLASSIFIER_LIST_NAMES.reduce((n, name) => n + (m?.[name]?.length ?? 0), 0);
+		out.push("", `overrides: +${count(overrides.add)} 添加 / −${count(overrides.remove)} 移除（/auto-router rules reset 还原内置）`);
+	}
+	out.push("", "编辑: /auto-router rules add|remove <list> <关键词…>");
+	return out.join("\n");
+}
+
+/**
+ * Apply one add/remove edit to the classifier overrides, in place on state.
+ * Adding back a removed builtin cancels the removal; removing a user-added
+ * keyword drops the addition. Returns changed/skipped keywords for feedback.
+ */
+export function applyRulesEdit(
+	state: AdapterState,
+	action: "add" | "remove",
+	name: ClassifierListName,
+	keywords: string[],
+): { changed: string[]; skipped: string[] } {
+	const addList = [...(state.classifierOverrides.add?.[name] ?? [])];
+	const removeList = [...(state.classifierOverrides.remove?.[name] ?? [])];
+	const inBase = new Set(baseClassifierList(name).map((k) => k.toLowerCase()));
+	const changed: string[] = [];
+	const skipped: string[] = [];
+	for (const keyword of keywords) {
+		const k = keyword.toLowerCase();
+		if (action === "add") {
+			const ri = removeList.findIndex((x) => x.toLowerCase() === k);
+			if (ri >= 0) {
+				removeList.splice(ri, 1); // re-activate a removed builtin
+				changed.push(keyword);
+			} else if (inBase.has(k) || addList.some((x) => x.toLowerCase() === k)) {
+				skipped.push(keyword);
+			} else {
+				addList.push(keyword);
+				changed.push(keyword);
+			}
+		} else {
+			const ai = addList.findIndex((x) => x.toLowerCase() === k);
+			if (ai >= 0) {
+				addList.splice(ai, 1); // drop a user addition
+				changed.push(keyword);
+			} else if (inBase.has(k) && !removeList.some((x) => x.toLowerCase() === k)) {
+				removeList.push(keyword);
+				changed.push(keyword);
+			} else {
+				skipped.push(keyword);
+			}
+		}
+	}
+	state.classifierOverrides = {
+		add: { ...(state.classifierOverrides.add ?? {}), [name]: addList },
+		remove: { ...(state.classifierOverrides.remove ?? {}), [name]: removeList },
+	};
+	return { changed, skipped };
 }
 
 async function runCommand(rawArgs: string, deps: CommandDeps, ctx: OmpExtensionContext): Promise<void> {
@@ -634,6 +744,41 @@ async function runCommand(rawArgs: string, deps: CommandDeps, ctx: OmpExtensionC
 				]),
 				"info",
 			);
+			return;
+		}
+		case "rules": {
+			const [action = "", ...ruleArgs] = arg.trim().split(/\s+/).filter((s) => s.length > 0);
+			if (action === "" || action === "show") {
+				ctx.ui.notify(formatClassifierRules(state.classifierOverrides), "info");
+				return;
+			}
+			if (action === "reset") {
+				state.classifierOverrides = {};
+				persistClassifierOverrides(state);
+				ctx.ui.notify("classifier rules reset — 已还原为内置判定规则", "info");
+				return;
+			}
+			if (action === "add" || action === "remove") {
+				const [listName, ...keywords] = ruleArgs;
+				if (!listName || keywords.length === 0 || !(CLASSIFIER_LIST_NAMES as readonly string[]).includes(listName)) {
+					ctx.ui.notify(
+						`usage: /auto-router rules ${action} <${CLASSIFIER_LIST_NAMES.join("|")}> <关键词…>`,
+						"warning",
+					);
+					return;
+				}
+				const { changed, skipped } = applyRulesEdit(state, action, listName as ClassifierListName, keywords);
+				persistClassifierOverrides(state);
+				ctx.ui.notify(
+					lines([
+						changed.length > 0 ? `${action === "add" ? "added" : "removed"} → ${listName}: ${changed.join(", ")}（已持久化，下一请求生效）` : undefined,
+						skipped.length > 0 ? `skipped (无变化): ${skipped.join(", ")}` : undefined,
+					]),
+					changed.length > 0 ? "info" : "warning",
+				);
+				return;
+			}
+			ctx.ui.notify(`unknown rules action: ${action} — show|add|remove|reset`, "warning");
 			return;
 		}
 		case "help": {

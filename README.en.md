@@ -20,7 +20,7 @@ Ported from the design ideas of [pi-auto-router](https://github.com/danialranjha
 - **Shadow mode**: record decisions but route by configured order, for comparison and validation
 - **Explainable**: `/auto-router explain` prints the full reasoning chain plus per-candidate ratings; decisions/usage are persisted as JSONL
 - **Restart memory**: circuit-breaker state and rolling first-visible-output latency persist (`circuit.json` / `first-output-latency.json`) for warm starts
-- **Env switches**: `OMP_AUTO_ROUTER_UVI_HARD=1` (exclude stressed-UVI providers), `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>` (classifier confidence gate, default 0.45), `OMP_AUTO_ROUTER_COOLDOWN_MS=<ms>` (post-failure target cooldown, default 60000, floor 5000)
+- **Env switches**: `OMP_AUTO_ROUTER_UVI_HARD=1` (exclude stressed-UVI providers), `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>` (classifier confidence gate, default 0.45), `OMP_AUTO_ROUTER_COOLDOWN_MS=<ms>` (post-failure target cooldown, default 60000, floor 5000), `OMP_AUTO_ROUTER_LLM_ADJUDICATE=0` (disable LLM adjudication of mixed-phase prompts, default on)
 - **Background quota refresh**: UVI quota snapshots refresh every 30s in the background (host-managed timer), so requests never block on an expired cache
 - **Dashboard widget**: after each decision a profile/target/first-visible-output latency/budget/circuit/UVI overview is rendered via `setWidget` (degrades silently when the host lacks it)
 - **Provider registry**: provider-specific knowledge (Kimi window labels, DeepSeek balance endpoint, per-model thinking ranges) lives in `provider-registry.ts`; target-level `balanceEndpoint` / `thinkingCap` override the defaults
@@ -235,7 +235,8 @@ activate:                           # auto-activate by cwd prefix
 | `label` | string | no | display label |
 | `billing` | `subscription/per-token` | no | default `subscription`; affects budget bucket and synthetic UVI |
 | `balanceEndpoint` | string | no | custom balance API (per-token providers) |
-| `thinkingCap` | `{min?, max?}` | no | thinking range (inclusive) the model accepts; overrides the provider-registry default. A tier thinking outside the range is clamped into range before steering, recorded as a `warn` event. E.g. `deepseek-v4-pro` defaults to `{min: high}` (accepts high/max only, rejects low/medium) |
+| `thinking` | `off/minimal/low/medium/high/xhigh/max` | no | overrides the owning tier's `thinking`; applied when failover reaches this target |
+| `thinkingCap` | `{min?, max?}` | no | thinking range (inclusive) the model accepts; overrides the provider-registry default. A tier/target thinking outside the range is clamped into range before steering, recorded as a `warn` event. E.g. `deepseek-v4-pro` defaults to `{min: high}` (accepts high/max only, rejects low/medium) |
 
 Credentials come from omp's auth chain (`agent.db` multi-credential) — **no keys** in the config file.
 
@@ -300,8 +301,10 @@ With no config file, or when all layers fail to parse, the plugin falls back to 
 ## Enabling routing
 
 ```text
-/model            → select Auto Router: <profile> (i.e. auto-router/<profile>)
+/model or /switch auto-router/<profile>
+  → select Auto Router: <profile> (for example, /switch auto-router/company)
 ```
+`/switch newapi/gpt-5.5` bypasses the plugin and goes directly to OMP's built-in NewAPI transport. The direct model's wire protocol is determined by OMP's model catalog (static `models.yml` records / provider discovery), not by an auto-router target.
 
 Or take over globally / per role (`~/.omp/agent/config.yml`):
 
@@ -320,8 +323,12 @@ Once selected, **no manual intervention is needed**: every request is auto-class
 |---|---|---|
 | `trivial` | short Q&A, no code | thinking low |
 | `simple` | single-file edits, explanations, grep-like | thinking low |
-| `standard` | code blocks, multi-file paths, diffs | thinking medium |
+| `standard` | code blocks, multi-file paths, diffs, implementation phrasing | thinking medium |
 | `complex` | refactor/migration/architecture keywords, long context, multi-turn same-task | thinking high |
+
+> **Split analysis**: the prompt is split into a phase sequence by phase conjunctions (`并/然后/接着/随后/再`, `and/then`) and sentence boundaries, and **the first phase sets the tier** — later phases are classified when their own turn arrives, so the tier flows with the phases. "帮我设计并实现一个登录功能" starts with design → complex (the build turn lands standard later: complex→standard); "实现支付逻辑，然后设计对账方案" starts with the build → standard (the design turn escalates: standard→complex); "按设计方案实现支付逻辑" is a single phase building on an existing plan → standard. Hard scope words (`重构/迁移/架构/跨文件`, `refactor/migrate/rewrite`) only count inside the first phase.
+>
+> Mixed-phase prompts (both planning and implementation phrasing inside the first phase, e.g. "implement the payment logic per the design doc") are semantically hard for keywords: by default the router asks **the current LLM** (the last decision's target; on a fresh session, the standard tier's first target) for a one-word adjudication (trivial/simple/standard/complex). Precedence: shortcut pin > policy force-tier > LLM adjudication > heuristic classifier. Adjudication failures/timeouts/unparseable replies fall back to the heuristic result and never touch routing health state. Disable with `OMP_AUTO_ROUTER_LLM_ADJUDICATE=0`.
 
 Explicit pinning (highest priority, tokens stripped):
 
@@ -334,7 +341,7 @@ Explicit pinning (highest priority, tokens stripped):
 @profile:economy temporarily switch profile (single request)
 ```
 
-Low confidence (< 0.45) falls back to `defaultTier`; multi-turn same-task conversations stick upward and never demote.
+Low confidence (< 0.45) falls back to `defaultTier`; multi-turn same-task conversations stick upward and never demote — except a clean build phase (implementation phrasing, no multi-step/repair signals), which may downgrade complex→standard so the tier flows with the design→build phase transition.
 
 ### Trigger conditions & wordlists per tier
 
@@ -354,6 +361,8 @@ refactor migrate migration redesign rearchitect re-architect overhaul rewrite
 across files  multiple files  cross-file  architecture
 ```
 
+> `方案/设计/规划/规格` and the whole-word `plan/design/spec` families are **soft planning words**, counted only inside the first task: demoted when that task also carries implementation phrasing (see the `standard` section), otherwise they push complex. All other multi-step words are hard scope terms and always escalate within the first task.
+
 **Multi-step words — word-boundary match (whole English words, avoids false hits like `planetary`/`specific`/`respect`)**
 ```
 plan plans planning planned          design designs designing
@@ -372,6 +381,16 @@ Any of these strong signals, with no multi-step word claiming complex:
   bug debug debugging broken crash exception stack trace traceback runtime error
   why is  why does  why did  what's wrong  what is wrong
   报错 异常 崩溃 排查 定位问题 什么原因 为什么会 为什么报错
+  ```
+- implementation phrasing (promotes to standard; soft planning words in the current task are demoted from complex):
+  ```
+  实现 开发 新增 添加 写个 写一个 做个 做一个 落地
+  ```
+  whole English words (word-boundary match):
+  ```
+  implement implements implemented implementing implementation
+  build builds building  create creates creating  add adds adding
+  develop develops developing
   ```
 - code / analysis intent (intent words like `实现`, `analyze`, `分析`) without structural signals
 - context 32k–100k tokens (long)
@@ -415,6 +434,7 @@ Any of these strong signals, with no multi-step word claiming complex:
 | `/auto-router uvi show\|enable\|disable\|refresh` | UVI quota pacing | `/auto-router uvi show` |
 | `/auto-router shadow show\|enable\|disable` | shadow mode | `/auto-router shadow enable` |
 | `/auto-router rate good\|bad [comment]` | decision feedback (persisted) | `/auto-router rate good good pick` |
+| `/auto-router rules [show]\|add\|remove <list> <words…>\|reset` | view/edit complexity classification rules (persisted; takes effect next request) | `/auto-router rules add mechanicalOp 同步数据` |
 | `/auto-router help` | all subcommands with examples | `/auto-router help` |
 
 In-request pinning: `@fast` / `@swe` / `@reasoning` / `@long` / `@vision` / `@profile:<name>` (see previous section).

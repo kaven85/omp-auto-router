@@ -148,6 +148,54 @@ describe("pipeline", () => {
 		expect(result.decision.hints.shortcut).toBe("@reasoning");
 	});
 
+	test("selected target thinking overrides the tier thinking level", () => {
+		const config: RouterConfig = {
+			active: "company",
+			profiles: {
+				company: {
+					defaultTier: "complex",
+					tiers: {
+						complex: {
+							thinking: "high",
+							targets: [
+								{ provider: "anthropic", model: "opus", thinking: "low" },
+								{ provider: "google", model: "gemini-pro" },
+							],
+						},
+					},
+				},
+			},
+		};
+		const result = route(
+			{
+				rawPrompt: "@reasoning prove there are infinitely many primes",
+				hasImages: false,
+				conversationDepth: 0,
+				candidates: targetCandidates(allTargets(config)),
+				quota: {},
+				now: NOW,
+			},
+			makeDeps({ registry: new ProfileRegistry(config, { cwd: "/tmp/work" }) }),
+		);
+		expect(result.decision.target).toEqual({ provider: "anthropic", model: "opus", thinking: "low" });
+		expect(result.decision.thinking).toBe("low");
+	});
+
+	test("classifierOverrides from deps steer the resolved tier", () => {
+		const candidates = targetCandidates(allTargets(CONFIG));
+		const baseline = route(
+			{ rawPrompt: "帮我造个轮子", hasImages: false, conversationDepth: 0, candidates, quota: {}, now: NOW },
+			makeDeps(),
+		);
+		expect(baseline.decision.tier).not.toBe("complex");
+		const overridden = route(
+			{ rawPrompt: "帮我造个轮子", hasImages: false, conversationDepth: 0, candidates, quota: {}, now: NOW },
+			makeDeps({ classifierOverrides: { add: { multiStep: ["造个轮子"] } } }),
+		);
+		expect(overridden.decision.tier).toBe("complex");
+		expect(overridden.decision.reasoning.join(" ")).toContain("multi-step");
+	});
+
 	test("@profile alias override switches profile per-request", () => {
 		const deps = makeDeps();
 		const result = route(
@@ -502,5 +550,61 @@ describe("pipeline", () => {
 		);
 		expect(result.decision.target.provider).toBe("anthropic");
 		expect(result.decision.budgetRemaining).toBe(7);
+	});
+
+	test("adjudicatedTier overrides the heuristic classifier", () => {
+		const deps = makeDeps();
+		const result = route(
+			{
+				// Heuristic lands on standard (implementation terminal phase);
+				// adjudication says complex → complex target wins.
+				rawPrompt: "帮我设计并实现一个登录功能",
+				hasImages: false,
+				conversationDepth: 0,
+				candidates: targetCandidates(allTargets(CONFIG)),
+				quota: {},
+				adjudicatedTier: "complex",
+				now: NOW,
+			},
+			deps,
+		);
+		expect(result.decision.tier).toBe("complex");
+		expect(result.decision.reasoning.join(" ")).toContain("llm adjudication");
+	});
+
+	test("shortcut pin beats adjudicatedTier", () => {
+		const deps = makeDeps();
+		const result = route(
+			{
+				rawPrompt: "@fast 帮我设计并实现一个登录功能",
+				hasImages: false,
+				conversationDepth: 0,
+				candidates: targetCandidates(allTargets(CONFIG)),
+				quota: {},
+				adjudicatedTier: "complex",
+				now: NOW,
+			},
+			deps,
+		);
+		expect(result.decision.tier).toBe("simple");
+	});
+
+	test("policy force-tier beats adjudicatedTier", () => {
+		const deps = makeDeps({
+			globalRules: [{ type: "force-tier", tier: "simple" }],
+		});
+		const result = route(
+			{
+				rawPrompt: "帮我设计并实现一个登录功能",
+				hasImages: false,
+				conversationDepth: 0,
+				candidates: targetCandidates(allTargets(CONFIG)),
+				quota: {},
+				adjudicatedTier: "complex",
+				now: NOW,
+			},
+			deps,
+		);
+		expect(result.decision.tier).toBe("simple");
 	});
 });

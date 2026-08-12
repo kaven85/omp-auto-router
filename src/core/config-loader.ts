@@ -105,6 +105,10 @@ function parseRouteTarget(raw: unknown, path: string, errors: string[]): RouteTa
 		if (typeof raw.balanceEndpoint === "string") target.balanceEndpoint = raw.balanceEndpoint;
 		else errors.push(`${path}.balanceEndpoint: expected a string`);
 	}
+	if (raw.thinking !== undefined) {
+		if (oneOf(raw.thinking, THINKING_LEVELS)) target.thinking = raw.thinking;
+		else errors.push(`${path}.thinking: must be one of ${joinOptions(THINKING_LEVELS)}`);
+	}
 	if (raw.thinkingCap !== undefined) {
 		if (!isRecord(raw.thinkingCap)) {
 			errors.push(`${path}.thinkingCap: expected {min?, max?} with thinking levels`);

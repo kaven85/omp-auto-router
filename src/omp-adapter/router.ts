@@ -18,12 +18,16 @@ import { isProviderRetryableError } from "@oh-my-pi/pi-ai/error";
 import { failoverStream, defaultIsRetryable, defaultIsSubstantive, formatError } from "../core/failover-engine";
 import type { FeedbackTracker } from "../core/feedback-tracker";
 import type { HostPorts } from "../core/host-ports";
+import { classifyComplexity } from "../core/complexity-classifier";
+import { classifyIntent } from "../core/intent-classifier";
 import { route } from "../core/pipeline";
+import { parseShortcut } from "../core/shortcut-parser";
 import { clampThinking } from "../core/thinking-cap";
-import type { QuotaSnapshot, RoutingDecision } from "../core/types";
+import type { ComplexityTier, QuotaSnapshot, RouteTarget, RoutingDecision, ThinkingLevel } from "../core/types";
 import type { AdapterState } from "./state";
 import { persistTrackers } from "./state";
 import { enrichCandidates, createHostPorts, quotaRefreshMs } from "./host-ports";
+import { adjudicationEnabled, adjudicateTier, pickAdjudicatorTarget } from "./llm-adjudicator";
 import type { OmpExtensionApi, OmpExtensionContext } from "./omp-api";
 import { fetchProviderBalance, resolveBalanceEndpoint, resolveThinkingCap } from "./provider-registry";
 import { redactSecrets } from "./redact";
@@ -213,34 +217,84 @@ function isVisibleResponseEvent(event: { type: string; [k: string]: unknown }): 
 	}
 	return event.type === "image_end" || event.type === "toolcall_start" || event.type === "toolcall_end" || event.type === "done";
 }
+
 /** Build the delegate factory: each candidate → host streamSimple with its key. */
 function buildFactory(
 	state: AdapterState,
 	pi: OmpExtensionApi,
 	context: StreamArgs["context"],
 	options: StreamArgs["options"],
+	tierThinking: ThinkingLevel | undefined,
 	onTargetStart?: (target: { provider: string; model: string }) => void,
 	onTargetVisible?: (target: { provider: string; model: string }) => void,
 ) {
 	const host = createHostPorts(pi, state.ctx!, state);
-	return async function* factory(target: { provider: string; model: string }) {
+	return async function* factory(target: RouteTarget) {
 		onTargetStart?.(target);
-		const model = state.ctx?.models.resolve(`${target.provider}/${target.model}`);
-		if (!model) {
+		const resolved = state.ctx?.models.resolve(`${target.provider}/${target.model}`);
+		if (!resolved) {
 			throw new Error(`auto-router: target not resolvable: ${target.provider}/${target.model}`);
 		}
 		const apiKey = await host.getApiKey(target);
-		const stream = streamSimple(model as never, context as never, {
-			...(options ?? {}),
-			...(apiKey !== undefined ? { apiKey } : {}),
-		} as never);
-		let visible = false;
-		for await (const event of stream) {
-			if (!visible && isVisibleResponseEvent(event)) {
-				visible = true;
-				onTargetVisible?.(target);
+
+		// Target-level thinking wins over the tier default. Apply it inside the
+		// candidate generator so failover can steer each target independently,
+		// then restore the session's previous level when that candidate ends.
+		const configuredThinking = target.thinking ?? tierThinking;
+		const appliedThinking =
+			configuredThinking !== undefined
+				? clampThinking(configuredThinking, resolveThinkingCap(target))
+				: undefined;
+		if (configuredThinking !== undefined && appliedThinking !== configuredThinking) {
+			state.eventLog.append({
+				type: "warn",
+				at: Date.now(),
+				what: "thinking-clamped",
+				target: `${target.provider}/${target.model}`,
+				from: configuredThinking,
+				to: appliedThinking,
+			});
+		}
+		const canSteerThinking =
+			appliedThinking !== undefined &&
+			!state.shadowEnabled &&
+			typeof pi.setThinkingLevel === "function";
+		const priorThinking =
+			canSteerThinking && typeof pi.getThinkingLevel === "function" ? pi.getThinkingLevel() : undefined;
+		if (canSteerThinking && appliedThinking !== undefined) {
+			try {
+				pi.setThinkingLevel(appliedThinking);
+			} catch (error) {
+				state.eventLog.append({
+					type: "error",
+					at: Date.now(),
+					what: "setThinkingLevel",
+					error: redactSecrets(formatError(error)),
+				});
 			}
-			yield event as never;
+		}
+
+		try {
+			const stream = streamSimple(resolved as never, context as never, {
+				...(options ?? {}),
+				...(apiKey !== undefined ? { apiKey } : {}),
+			} as never);
+			let visible = false;
+			for await (const event of stream) {
+				if (!visible && isVisibleResponseEvent(event)) {
+					visible = true;
+					onTargetVisible?.(target);
+				}
+				yield event as never;
+			}
+		} finally {
+			if (canSteerThinking && priorThinking !== undefined) {
+				try {
+					pi.setThinkingLevel(priorThinking);
+				} catch {
+					// restore best-effort; the next candidate/request re-steers anyway
+				}
+			}
 		}
 	};
 }
@@ -409,6 +463,45 @@ export function createStreamHandler(
 
 		const now = new Date();
 		const flags = createPipelineFlags();
+
+		// LLM adjudication: mixed-phase prompts ("设计并实现 X") are
+		// semantically ambiguous for keyword heuristics — ask the session's
+		// current LLM to pick the tier. Fail-open: errors/timeouts keep the
+		// heuristic decision. Runs before route() so the adjudicated tier
+		// flows through the normal precedence (shortcut > policy > adjudication).
+		let adjudicatedTier: ComplexityTier | undefined;
+		let adjudicatorModel: string | undefined;
+		if (adjudicationEnabled()) {
+			const preShortcut = parseShortcut(rawPrompt);
+			const pre = classifyComplexity({
+				prompt: preShortcut.cleanPrompt,
+				estimatedTokens:
+					estimatedTokens ?? Math.max(1, Math.ceil(preShortcut.cleanPrompt.length / 4)),
+				hasImages,
+				conversationDepth: state.decisions.list().length,
+				intent: classifyIntent(preShortcut.cleanPrompt),
+				shortcut: preShortcut,
+				...(priorTier !== undefined ? { priorTier } : {}),
+				overrides: state.classifierOverrides,
+			});
+			if (pre.signals.mixedPhase) {
+				const target = pickAdjudicatorTarget(state, profileName);
+				if (target) {
+					const adjudicated = await adjudicateTier(
+						state,
+						host,
+						target,
+						preShortcut.cleanPrompt,
+						args.options?.signal,
+					);
+					if (adjudicated) {
+						adjudicatedTier = adjudicated.tier;
+						adjudicatorModel = adjudicated.model;
+					}
+				}
+			}
+		}
+
 		const { decision, cleanPrompt } = route(
 			{
 				rawPrompt,
@@ -419,6 +512,7 @@ export function createStreamHandler(
 				candidates,
 				quota,
 				...(estimatedTokens !== undefined ? { estimatedTokens } : {}),
+				...(adjudicatedTier !== undefined ? { adjudicatedTier } : {}),
 				now,
 			},
 			{
@@ -428,14 +522,20 @@ export function createStreamHandler(
 				budgets: state.budgets,
 				uviHardMode: flags.uviHardMode,
 				confidenceThreshold: flags.confidenceThreshold,
+				classifierOverrides: state.classifierOverrides,
 			},
 		);
 
+		if (adjudicatedTier !== undefined && adjudicatorModel !== undefined) {
+			decision.reasoning.push(`llm adjudication by ${adjudicatorModel} → ${adjudicatedTier}`);
+		}
+
 		// Shadow mode: keep the decision for explain/stats, but actually route
 		// in the selected tier's literal config order (no partition reordering).
+		const tierCfg = state.registry.tierConfig(profileName, decision.tier);
+		const tierThinking = tierCfg?.thinking;
 		let finalOrder = decision.orderedCandidates;
 		if (state.shadowEnabled) {
-			const tierCfg = state.registry.tierConfig(profileName, decision.tier);
 			finalOrder =
 				tierCfg?.targets.filter((t) => host.isHealthy(t)) ?? [];
 			decision.orderedCandidates = finalOrder;
@@ -447,6 +547,9 @@ export function createStreamHandler(
 			decision.orderedCandidates = finalOrder;
 			decision.target = finalOrder[0] ?? decision.target;
 		}
+		const selectedThinking = decision.target.thinking ?? tierThinking;
+		if (selectedThinking !== undefined) decision.thinking = selectedThinking;
+		else delete decision.thinking;
 
 		// No eligible candidate: failoverStream would throw a bare programmer
 		// error, so fail with an actionable message instead. Exclusion reasons
@@ -537,7 +640,7 @@ export function createStreamHandler(
 					error: redactSecrets(formatError(error)),
 				});
 			},
-			onTargetSettled: (target: { provider: string; model: string }) => {
+			onTargetSettled: (target: RouteTarget) => {
 				settledTarget = target;
 				const key = `${target.provider}/${target.model}`;
 				state.circuit.recordSuccess(key);
@@ -549,13 +652,14 @@ export function createStreamHandler(
 				if (!state.shadowEnabled) {
 					const key = `${target.provider}/${target.model}`;
 					state.sessionUsage.calls.set(key, (state.sessionUsage.calls.get(key) ?? 0) + 1);
-					if (decision.thinking !== undefined) {
+					const settledThinking = target.thinking ?? tierThinking;
+					if (settledThinking !== undefined) {
 						let seen = state.sessionUsage.thinking.get(key);
 						if (!seen) {
 							seen = new Set<string>();
 							state.sessionUsage.thinking.set(key, seen);
 						}
-						seen.add(decision.thinking);
+						seen.add(settledThinking);
 					}
 				}
 			},
@@ -566,6 +670,7 @@ export function createStreamHandler(
 			pi,
 			args.context,
 			args.options,
+			tierThinking,
 			(target) => {
 				targetStarts.set(`${target.provider}/${target.model}`, Date.now());
 			},
@@ -578,47 +683,6 @@ export function createStreamHandler(
 			},
 		);
 
-		// Apply the tier's thinking level to the real request: set before the
-		// delegate stream starts, restore the session's previous level when the
-		// stream ends (including abort/early-return of the generator). Skipped
-		// in shadow mode, which must not mutate session behavior.
-		//
-		// The configured level is clamped into the target model's supported
-		// range (registry default, overridable per-target) so a misconfigured
-		// tier can never hand the provider an effort it rejects — e.g.
-		// deepseek-v4-pro accepts only high/max, never low/medium.
-		const thinkingCap = resolveThinkingCap(decision.target);
-		const appliedThinking =
-			decision.thinking !== undefined ? clampThinking(decision.thinking, thinkingCap) : undefined;
-		if (decision.thinking !== undefined && appliedThinking !== decision.thinking) {
-			state.eventLog.append({
-				type: "warn",
-				at: Date.now(),
-				what: "thinking-clamped",
-				target: `${decision.target.provider}/${decision.target.model}`,
-				from: decision.thinking,
-				to: appliedThinking,
-			});
-		}
-		const canSteerThinking =
-			appliedThinking !== undefined &&
-			!state.shadowEnabled &&
-			typeof pi.setThinkingLevel === "function";
-		const priorThinking =
-			canSteerThinking && typeof pi.getThinkingLevel === "function" ? pi.getThinkingLevel() : undefined;
-		if (canSteerThinking && appliedThinking !== undefined) {
-			try {
-				pi.setThinkingLevel(appliedThinking);
-			} catch (error) {
-				state.eventLog.append({
-					type: "error",
-					at: Date.now(),
-					what: "setThinkingLevel",
-					error: redactSecrets(formatError(error)),
-				});
-			}
-		}
-
 		try {
 			for await (const event of failoverStream(finalOrder, factory, hooks, { signal: args.options?.signal })) {
 				if (event.type === "done" && settledTarget && typeof event.message === "object" && event.message !== null) {
@@ -627,13 +691,6 @@ export function createStreamHandler(
 				yield event;
 			}
 		} finally {
-			if (canSteerThinking && priorThinking !== undefined) {
-				try {
-					pi.setThinkingLevel(priorThinking);
-				} catch {
-					// restore best-effort; the next request re-steers anyway
-				}
-			}
 			// Warm-start persistence: keep circuit/latency snapshots across restarts.
 			persistTrackers(state);
 		}

@@ -15,7 +15,7 @@ import { auditBudget } from "./budget-auditor";
 import type { BudgetTracker } from "./budget-tracker";
 import { partitionCandidates } from "./candidate-partitioner";
 import type { CircuitBreaker } from "./circuit-breaker";
-import { classifyComplexity } from "./complexity-classifier";
+import { classifyComplexity, type ClassifierOverrides } from "./complexity-classifier";
 import { classifyIntent } from "./intent-classifier";
 import type { LatencyTracker } from "./latency-tracker";
 import { PolicyEngine } from "./policy-engine";
@@ -50,6 +50,12 @@ export interface PipelineInput {
 	quota: Record<string, QuotaSnapshot>;
 	/** Optional authoritative token estimate from the host. Falls back to chars/4 of the prompt. */
 	estimatedTokens?: number;
+	/**
+	 * Tier adjudicated by the session's current LLM for a semantically
+	 * ambiguous (mixed-phase) prompt. Precedence: shortcut pin > policy
+	 * force-tier > adjudication > classifier > defaultTier.
+	 */
+	adjudicatedTier?: ComplexityTier;
 	now: Date;
 }
 
@@ -64,6 +70,8 @@ export interface PipelineDeps {
 	confidenceThreshold?: number;
 	/** Extra rules layered on top of the active profile's rules. */
 	globalRules?: PolicyRuleConfig[];
+	/** User-edited classifier keyword overrides (`/auto-router rules`). */
+	classifierOverrides?: ClassifierOverrides;
 }
 
 export interface PipelineResult {
@@ -110,6 +118,7 @@ export function route(input: PipelineInput, deps: PipelineDeps): PipelineResult 
 		intent,
 		shortcut,
 		...(input.priorTier !== undefined ? { priorTier: input.priorTier } : {}),
+		...(deps.classifierOverrides !== undefined ? { overrides: deps.classifierOverrides } : {}),
 	});
 	reasoning.push(...complexity.reasons);
 
@@ -145,6 +154,11 @@ export function route(input: PipelineInput, deps: PipelineDeps): PipelineResult 
 	} else if (pre.tierOverride) {
 		tier = pre.tierOverride;
 		tierSource = "policy force-tier";
+	} else if (input.adjudicatedTier !== undefined) {
+		// LLM adjudication of a mixed-phase prompt outranks the keyword
+		// heuristic but never the user's shortcut or a policy rule.
+		tier = input.adjudicatedTier;
+		tierSource = "llm adjudication";
 	} else if (complexity.confidence >= threshold) {
 		tier = complexity.tier;
 		tierSource = `classifier (${complexity.confidence.toFixed(2)})`;
@@ -266,13 +280,14 @@ export function route(input: PipelineInput, deps: PipelineDeps): PipelineResult 
 
 	// 12. Decision
 	const selected = finalOrder[0];
+	const selectedThinking = selected?.target.thinking ?? tierCfg?.thinking;
 	const decision: RoutingDecision = {
 		profile: profileName,
 		tier,
 		confidence: complexity.confidence,
 		target: selected?.target ?? { provider: "none", model: "none" },
 		orderedCandidates: finalOrder.map(c => c.target),
-		...(tierCfg?.thinking !== undefined ? { thinking: tierCfg.thinking } : {}),
+		...(selectedThinking !== undefined ? { thinking: selectedThinking } : {}),
 		reasoning,
 		estimatedTokens,
 		hints: {

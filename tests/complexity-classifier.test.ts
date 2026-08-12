@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	MULTI_STEP_KEYWORDS,
 	classifyComplexity,
+	resolveClassifierLists,
 	type ClassifyComplexityInput,
 } from "../src/core/complexity-classifier";
 import type { IntentResult, ShortcutResult } from "../src/core/types";
@@ -249,6 +250,134 @@ describe("classifyComplexity — base tiers", () => {
 	});
 });
 
+describe("classifyComplexity — implementation phrasing", () => {
+	test("bare implementation phrasing reaches standard", () => {
+		const result = classifyComplexity(
+			input({ prompt: "帮我实现一个登录功能", intent: CODE_INTENT }),
+		);
+		expect(result.tier).toBe("standard");
+		expect(result.signals.implementation).toBe(true);
+		expect(result.signals.multiStep).toBe(false);
+		expect(result.reasons.join(" ")).toContain("implementation");
+	});
+
+	test("implementation in the current phase demotes soft planning words", () => {
+		// Implementation is the work NOW (build-on-existing-plan, or the first
+		// phase is the build) → standard. Follow-up phases after 并/然后/再/
+		// and/then don't count — they get their own turn later.
+		for (const prompt of [
+			"实现这个方案里的支付逻辑",
+			"按设计方案实现支付逻辑",
+			"implement the retry logic per spec",
+			"实现支付逻辑，然后设计对账方案",
+			"build the endpoint, then design the retry strategy",
+		]) {
+			const result = classifyComplexity(input({ prompt, intent: CODE_INTENT }));
+			expect(result.tier, prompt).toBe("standard");
+			expect(result.signals.implementation, prompt).toBe(true);
+			expect(result.signals.multiStep, prompt).toBe(false);
+		}
+	});
+
+	test("planning in the current phase reaches complex", () => {
+		// The current ask IS the design work → complex, even when a follow-up
+		// build phase is mentioned (complex → standard across turns).
+		for (const prompt of [
+			"输出订单模块的设计方案",
+			"帮我设计并实现一个登录功能",
+			"先设计方案，再开发落地",
+			"design and implement the checkout flow",
+			"plan the rollout, then build it",
+		]) {
+			const result = classifyComplexity(input({ prompt, intent: CODE_INTENT }));
+			expect(result.tier, prompt).toBe("complex");
+			expect(result.signals.multiStep, prompt).toBe(true);
+		}
+	});
+
+	test("hard scope words only count in the current task", () => {
+		// Follow-up refactor is a later turn's problem.
+		const future = classifyComplexity(
+			input({ prompt: "实现支付逻辑，然后重构整个架构", intent: CODE_INTENT }),
+		);
+		expect(future.tier).toBe("standard");
+		// Same words in the current task → complex.
+		const current = classifyComplexity(
+			input({ prompt: "重构支付模块的架构并实现新逻辑", intent: CODE_INTENT }),
+		);
+		expect(current.tier).toBe("complex");
+	});
+
+	test("implementation + hard scope words still reaches complex", () => {
+		for (const prompt of [
+			"设计并实现一套跨文件的重构",
+			"implement the migration plan for the schema",
+			"实现新架构并落地",
+		]) {
+			const result = classifyComplexity(input({ prompt, intent: CODE_INTENT }));
+			expect(result.tier, prompt).toBe("complex");
+			expect(result.signals.multiStep, prompt).toBe(true);
+		}
+	});
+
+	test("planning-only phrasing without implementation still reaches complex", () => {
+		// No implementation keyword → soft words keep their complex push.
+		const result = classifyComplexity(
+			input({ prompt: "输出订单模块的设计方案", intent: CODE_INTENT }),
+		);
+		expect(result.tier).toBe("complex");
+		expect(result.signals.implementation).toBe(false);
+		expect(result.signals.multiStep).toBe(true);
+	});
+
+	test("removing the implementation keyword restores complex for soft words", () => {
+		const result = classifyComplexity(
+			input({
+				prompt: "实现这个方案里的支付逻辑",
+				intent: CODE_INTENT,
+				overrides: { remove: { implementation: ["实现"] } },
+			}),
+		);
+		expect(result.tier).toBe("complex");
+		expect(result.signals.multiStep).toBe(true);
+	});
+
+	test("mixed-phase prompts set the mixedPhase signal", () => {
+		// Both signals inside the CURRENT phase → semantically ambiguous,
+		// eligible for LLM adjudication.
+		const mixed = classifyComplexity(
+			input({ prompt: "按设计方案实现支付逻辑", intent: CODE_INTENT }),
+		);
+		expect(mixed.signals.mixedPhase).toBe(true);
+		// Phase-split prompts are NOT mixed: "设计并实现" is a design phase
+		// now, the implementation belongs to a later phase.
+		const splitPhases = classifyComplexity(
+			input({ prompt: "帮我设计并实现一个登录功能", intent: CODE_INTENT }),
+		);
+		expect(splitPhases.signals.mixedPhase).toBe(false);
+		const pureImpl = classifyComplexity(
+			input({ prompt: "帮我实现一个登录功能", intent: CODE_INTENT }),
+		);
+		expect(pureImpl.signals.mixedPhase).toBe(false);
+		const purePlan = classifyComplexity(
+			input({ prompt: "输出订单模块的设计方案", intent: CODE_INTENT }),
+		);
+		expect(purePlan.signals.mixedPhase).toBe(false);
+	});
+
+	test("added implementation word term demotes same-clause soft planning words", () => {
+		const result = classifyComplexity(
+			input({
+				prompt: "please ship the design for the widget",
+				intent: CODE_INTENT,
+				overrides: { add: { implementationWord: ["ship"] } },
+			}),
+		);
+		expect(result.tier).toBe("standard");
+		expect(result.signals.implementation).toBe(true);
+	});
+});
+
 describe("classifyComplexity — shortcut override", () => {
 	test("@fast pins simple even for epic context", () => {
 		const result = classifyComplexity(
@@ -310,6 +439,28 @@ describe("classifyComplexity — sticky escalation", () => {
 		expect(result.tier).toBe("standard");
 		expect(result.signals.stickyEscalation).toBe(false);
 	});
+
+	test("phase transition: clean build request may downgrade complex → standard", () => {
+		// Turn 1 "帮我设计并实现一个登录功能" is complex (design phase). Turn 2
+		// is the build phase — a new phase, not the same task continuing, so
+		// sticky escalation must not pin it to complex.
+		const result = classifyComplexity(
+			input({ prompt: "开始实现登录功能", intent: CODE_INTENT, priorTier: "complex" }),
+		);
+		expect(result.tier).toBe("standard");
+		expect(result.signals.stickyEscalation).toBe(false);
+		expect(result.reasons.join(" ")).toContain("phase transition");
+	});
+
+	test("sticky holds when the session still carries repair/debug signals", () => {
+		// An ongoing debugging turn is the SAME task — no downgrade. ("修复"
+		// is repair phrasing, not implementation phrasing.)
+		const result = classifyComplexity(
+			input({ prompt: "继续排查并修复这个报错", intent: CODE_INTENT, priorTier: "complex" }),
+		);
+		expect(result.tier).toBe("complex");
+		expect(result.signals.stickyEscalation).toBe(true);
+	});
 });
 
 describe("classifyComplexity — confidence and reasons", () => {
@@ -345,5 +496,93 @@ describe("classifyComplexity — confidence and reasons", () => {
 	test("multi-step keyword table is exported and bilingual", () => {
 		expect(MULTI_STEP_KEYWORDS).toContain("refactor");
 		expect(MULTI_STEP_KEYWORDS).toContain("重构");
+	});
+});
+
+describe("classifyComplexity — user rule overrides", () => {
+	test("added multiStep keyword escalates to complex", () => {
+		const base = classifyComplexity(input({ prompt: "帮我造个轮子", intent: GENERAL_INTENT, estimatedTokens: 500 }));
+		expect(base.signals.multiStep).toBe(false);
+		const result = classifyComplexity(
+			input({
+				prompt: "帮我造个轮子",
+				intent: GENERAL_INTENT,
+				estimatedTokens: 500,
+				overrides: { add: { multiStep: ["造个轮子"] } },
+			}),
+		);
+		expect(result.tier).toBe("complex");
+		expect(result.signals.multiStep).toBe(true);
+	});
+
+	test("added whole-word term matches with word boundaries", () => {
+		const result = classifyComplexity(
+			input({
+				prompt: "please orchestrate the rollout",
+				intent: GENERAL_INTENT,
+				estimatedTokens: 500,
+				overrides: { add: { multiStepWord: ["orchestrate"] } },
+			}),
+		);
+		expect(result.tier).toBe("complex");
+		// Substring of a longer word must NOT hit the whole-word term.
+		const partial = classifyComplexity(
+			input({
+				prompt: "the orchestrated rollout",
+				intent: GENERAL_INTENT,
+				estimatedTokens: 500,
+				overrides: { add: { multiStepWord: ["orchestra"] } },
+			}),
+		);
+		expect(partial.signals.multiStep).toBe(false);
+	});
+
+	test("removed builtin keyword stops matching", () => {
+		const result = classifyComplexity(
+			input({
+				prompt: "refactor this",
+				intent: CODE_INTENT,
+				estimatedTokens: 500,
+				overrides: { remove: { multiStep: ["refactor"] } },
+			}),
+		);
+		expect(result.signals.multiStep).toBe(false);
+		expect(result.tier).not.toBe("complex");
+	});
+
+	test("added mechanicalOp phrase pins mechanical tasks to simple", () => {
+		const result = classifyComplexity(
+			input({
+				prompt: "帮我同步数据",
+				intent: CODE_INTENT,
+				estimatedTokens: 500,
+				overrides: { add: { mechanicalOp: ["同步数据"] } },
+			}),
+		);
+		expect(result.signals.mechanicalOp).toBe(true);
+		expect(result.tier).toBe("simple");
+	});
+
+	test("empty overrides are identical to the builtin baseline", () => {
+		const prompt = "refactor the auth module across files";
+		const base = classifyComplexity(input({ prompt, intent: CODE_INTENT, estimatedTokens: 500 }));
+		const empty = classifyComplexity(
+			input({ prompt, intent: CODE_INTENT, estimatedTokens: 500, overrides: {} }),
+		);
+		const emptyArrays = classifyComplexity(
+			input({ prompt, intent: CODE_INTENT, estimatedTokens: 500, overrides: { add: { multiStep: [] }, remove: {} } }),
+		);
+		expect(empty).toEqual(base);
+		expect(emptyArrays).toEqual(base);
+	});
+
+	test("resolveClassifierLists shares base constants when overrides are empty", () => {
+		expect(resolveClassifierLists(undefined).multiStep).toBe(MULTI_STEP_KEYWORDS);
+		expect(resolveClassifierLists({}).multiStep).toBe(MULTI_STEP_KEYWORDS);
+		expect(resolveClassifierLists({ add: { multiStep: [] } }).multiStep).toBe(MULTI_STEP_KEYWORDS);
+		const merged = resolveClassifierLists({ add: { multiStep: ["造轮子"] } });
+		expect(merged.multiStep).not.toBe(MULTI_STEP_KEYWORDS);
+		expect(merged.multiStep).toContain("造轮子");
+		expect(merged.multiStep.length).toBe(MULTI_STEP_KEYWORDS.length + 1);
 	});
 });

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { formatQuotaTable, registerCommands } from "../../src/omp-adapter/commands";
 import { createAdapterState } from "../../src/omp-adapter/state";
 import type { RouterConfig } from "../../src/core/types";
+import type { ClassifierOverrides } from "../../src/core/complexity-classifier";
 import type { OmpExtensionContext } from "../../src/omp-adapter/omp-api";
 import { MockExtensionApi } from "./mock-omp";
 
@@ -381,6 +382,94 @@ describe("adapter commands", () => {
 		const show = api.commands.get("auto-router")!.getArgumentCompletions!("show ");
 		expect(show!.map((i) => i.label).sort()).toEqual(["economy", "premium"]);
 		expect(show!.find((i) => i.label === "premium")!.hint).toBe("当前激活");
+	});
+
+	test("rules view shows every editable list with tier and weight", async () => {
+		const { invoke, notifies } = setup();
+		await invoke("rules");
+		const out = notifies.join("\n");
+		for (const list of ["multiStep", "multiStepWord", "repairDebug", "mechanicalOp", "mechanicalOpWord", "implementation", "implementationWord"]) {
+			expect(out).toContain(list);
+		}
+		expect(out).toContain("→ complex");
+		expect(out).toContain("→ standard");
+		expect(out).toContain("→ simple");
+		expect(out).toContain("refactor");
+		expect(out).toContain("提交代码");
+		expect(out).toContain("内置信号（不可编辑）");
+		expect(out).toContain("@fast→simple");
+		// No overrides yet → no overrides summary line.
+		expect(out).not.toContain("overrides: +");
+	});
+
+	test("rules add persists keywords and marks them in the view", async () => {
+		const { invoke, notifies, state } = setup();
+		await invoke("rules add mechanicalOp 同步数据 部署上线");
+		expect(notifies.join("\n")).toContain("added → mechanicalOp: 同步数据, 部署上线");
+		expect(state.classifierOverrides.add?.mechanicalOp).toEqual(["同步数据", "部署上线"]);
+		// Persisted to classifier-rules.json in the state dir.
+		expect(state.stateStore.readJson<ClassifierOverrides>("classifier-rules.json")).toEqual(state.classifierOverrides);
+		await invoke("rules");
+		const out = notifies.join("\n");
+		expect(out).toContain("同步数据 (+)");
+		expect(out).toContain("overrides: +2 添加");
+		// Adding the same keyword again is a no-op skip.
+		await invoke("rules add mechanicalOp 同步数据");
+		expect(notifies.at(-1)).toContain("skipped (无变化): 同步数据");
+	});
+
+	test("rules remove hides builtins and re-adding cancels the removal", async () => {
+		const { invoke, notifies, state } = setup();
+		await invoke("rules remove multiStep refactor");
+		expect(notifies.join("\n")).toContain("removed → multiStep: refactor");
+		expect(state.classifierOverrides.remove?.multiStep).toEqual(["refactor"]);
+		await invoke("rules");
+		const view = notifies.at(-1)!;
+		expect(view).not.toContain("refactor,");
+		expect(view).toContain("−1 移除");
+		// Re-adding a removed builtin cancels the removal instead of duplicating.
+		await invoke("rules add multiStep refactor");
+		expect(state.classifierOverrides.add?.multiStep ?? []).toEqual([]);
+		expect(state.classifierOverrides.remove?.multiStep).toEqual([]);
+	});
+
+	test("rules remove of a user-added keyword drops the addition", async () => {
+		const { invoke, state } = setup();
+		await invoke("rules add mechanicalOp 同步数据");
+		await invoke("rules remove mechanicalOp 同步数据");
+		expect(state.classifierOverrides.add?.mechanicalOp).toEqual([]);
+		expect(state.classifierOverrides.remove?.mechanicalOp ?? []).toEqual([]);
+	});
+
+	test("rules reset clears all overrides", async () => {
+		const { invoke, notifies, state } = setup();
+		await invoke("rules add multiStep 造轮子");
+		await invoke("rules reset");
+		expect(notifies.at(-1)).toContain("已还原为内置判定规则");
+		expect(state.classifierOverrides).toEqual({});
+		expect(state.stateStore.readJson<ClassifierOverrides>("classifier-rules.json")).toEqual({});
+	});
+
+	test("rules validates list name and keyword presence", async () => {
+		const { invoke, notifies } = setup();
+		await invoke("rules add bogusList 词");
+		expect(notifies.at(-1)).toContain("usage: /auto-router rules add");
+		await invoke("rules add mechanicalOp");
+		expect(notifies.at(-1)).toContain("usage: /auto-router rules add");
+		await invoke("rules frobnicate");
+		expect(notifies.at(-1)).toContain("unknown rules action");
+	});
+
+	test("completions: rules completes actions then list names", () => {
+		const { api } = setup();
+		const actions = api.commands.get("auto-router")!.getArgumentCompletions!("rules ");
+		expect(actions!.map((i) => i.label).sort()).toEqual(["add", "remove", "reset", "show"]);
+		const lists = api.commands.get("auto-router")!.getArgumentCompletions!("rules add ");
+		expect(lists!.map((i) => i.label)).toEqual(["multiStep", "multiStepWord", "repairDebug", "mechanicalOp", "mechanicalOpWord", "implementation", "implementationWord"]);
+		expect(lists!.find((i) => i.label === "multiStep")!.hint).toContain("→ complex");
+		const filtered = api.commands.get("auto-router")!.getArgumentCompletions!("rules remove mech");
+		expect(filtered!.map((i) => i.label).sort()).toEqual(["mechanicalOp", "mechanicalOpWord"]);
+		expect(filtered![0]!.value).toBe("rules remove mechanicalOp ");
 	});
 });
 

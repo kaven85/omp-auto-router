@@ -172,6 +172,45 @@ profiles:
 		expect(errors.some((e) => e.includes("targets[0].billing"))).toBe(true);
 	});
 
+	test("target thinking overrides the tier thinking level", () => {
+		const yaml = `
+profiles:
+  company:
+    tiers:
+      complex:
+        thinking: high
+        targets:
+          - provider: newapi
+            model: gpt-5.6-sol
+            thinking: low
+          - provider: newapi
+            model: gpt-5.5
+`;
+		const { config, errors } = parseRouterConfig(yaml);
+		expect(errors).toEqual([]);
+		const targets = config!.profiles.company!.tiers.complex!.targets;
+		expect(targets[0]!.thinking).toBe("low");
+		expect(targets[1]!.thinking).toBeUndefined();
+	});
+
+	test("target thinking rejects invalid levels with dotted path", () => {
+		const yaml = `
+profiles:
+  company:
+    tiers:
+      complex:
+        targets:
+          - provider: newapi
+            model: gpt-5.6-sol
+            thinking: ludicrous
+`;
+		const { config, errors } = parseRouterConfig(yaml);
+		expect(config).toBeUndefined();
+		expect(errors).toContain(
+			"profiles.company.tiers.complex.targets[0].thinking: must be one of off, minimal, low, medium, high, xhigh, max",
+		);
+	});
+
 	test("target thinkingCap parses min/max", () => {
 		const yaml = `
 profiles:

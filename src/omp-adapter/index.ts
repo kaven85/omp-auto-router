@@ -130,6 +130,7 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 	// ── Capability probes (those computable at load) ─────────────────────────
 	state.doctorProbes.setModel = typeof pi.setModel === "function";
 	state.doctorProbes.appendEntry = typeof pi.appendEntry === "function";
+	state.doctorProbes.retryEvents = typeof pi.on === "function";
 
 	// ── Commands: registered once at load; read state through the ref ───────
 	registerCommands(pi, {

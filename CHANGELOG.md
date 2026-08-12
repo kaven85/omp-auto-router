@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [Unreleased]
+
+### Added
+
+- Route targets can override their tier's thinking level with `thinking` (for example `{ provider: newapi, model: gpt-5.6-sol, thinking: low }`). The override is resolved per failover candidate, still clamped by that target's `thinkingCap`, and the previous session thinking level is restored after each delegate stream.
+
+
 ## [0.4.2] - 2026-08-11
 
 ### Fixed

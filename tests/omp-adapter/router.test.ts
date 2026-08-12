@@ -73,11 +73,11 @@ const MODELS: OmpModel[] = [
 	{ provider: "google", id: "gemini", api: "google-generative-ai", reasoning: true, input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 65_536, cost: { input: 1.25, output: 10, cacheRead: 0.31, cacheWrite: 1.25 } },
 ];
 
-function setup() {
+function setup(config: RouterConfig = CONFIG, models: OmpModel[] = MODELS) {
 	const api = new MockExtensionApi();
-	api.models = MODELS;
+	api.models = models;
 	const dir = mkdtempSync(join(tmpdir(), "ar-router-"));
-	const state = createAdapterState(CONFIG, dir, "/tmp/work");
+	const state = createAdapterState(config, dir, "/tmp/work");
 	const ctx = api.makeCtx();
 	refreshModels(state, ctx);
 	streamCalls.length = 0;
@@ -124,6 +124,7 @@ describe("adapter router (Mode A)", () => {
 		expect(api.entries.some((e) => e.customType === "com.omp.auto-router.decision")).toBe(true);
 		rmSync(dir, { recursive: true, force: true });
 	});
+
 	test("thinking level is applied during the delegate stream and restored afterwards", async () => {
 		const { api, state } = setup();
 		streamBehavior = async function* () {
@@ -138,6 +139,51 @@ describe("adapter router (Mode A)", () => {
 		for await (const _event of handler) { /* drain */ }
 		// complex tier config thinking=high; mock's pre-existing level is "medium".
 		expect(api.thinkingLevels).toEqual(["high", "medium"]);
+	});
+
+	test("target thinking overrides tier thinking per failover candidate", async () => {
+		const config: RouterConfig = {
+			active: "mixed",
+			profiles: {
+				mixed: {
+					defaultTier: "complex",
+					tiers: {
+						complex: {
+							thinking: "high",
+							targets: [
+								{ provider: "anthropic", model: "opus", thinking: "low" },
+								{ provider: "google", model: "gemini" },
+							],
+						},
+					},
+				},
+			},
+		};
+		const { api, state, ctx, dir } = setup(config);
+		let calls = 0;
+		streamBehavior = async function* () {
+			calls += 1;
+			if (calls === 1) throw new Error("503 overloaded");
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		state.ctx = ctx;
+		try {
+			const handler = createStreamHandler(state, api, {
+				model: { provider: "auto-router", id: "mixed" },
+				context: contextWithPrompt("@reasoning prove primes"),
+				options: {},
+			});
+			for await (const _event of handler) { /* drain */ }
+			expect(streamCalls).toEqual([
+				{ provider: "anthropic", model: "opus" },
+				{ provider: "google", model: "gemini" },
+			]);
+			expect(api.thinkingLevels).toEqual(["low", "medium", "high", "medium"]);
+			expect(state.lastDecision?.decision.thinking).toBe("low");
+			expect(state.sessionUsage.thinking.get("google/gemini")?.has("high")).toBe(true);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	test("configured thinking is clamped into the target model's supported range", async () => {
