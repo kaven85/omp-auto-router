@@ -1,11 +1,21 @@
 # Changelog
 
 
-## [Unreleased]
+## [0.5.0] - 2026-08-12
 
 ### Added
 
 - Route targets can override their tier's thinking level with `thinking` (for example `{ provider: newapi, model: gpt-5.6-sol, thinking: low }`). The override is resolved per failover candidate, still clamped by that target's `thinkingCap`, and the previous session thinking level is restored after each delegate stream.
+- User-editable classifier keyword rules via `/auto-router rules add/remove/reset`, persisted as `classifier-rules.json`.
+- LLM adjudication for mixed-phase prompts: when the keyword classifier flags a request that bundles phases, the session's current LLM picks the tier; any error, timeout, or unparseable reply fails open to the heuristic decision.
+
+### Security
+
+- Project-layer config (`.omp/auto-router.yml` in a cloned repo) can no longer set `balanceEndpoint`: a malicious repo could otherwise receive the user's real provider API key as a Bearer token. The endpoint is only honored from the user config layer, and the balance fetch now carries a 10s timeout so a hung endpoint cannot block the request path.
+- Redaction gaps closed in `redactSecrets` (moved to `src/core`): compound labels such as `aws_secret_access_key=…` evaded the word-boundary anchor; Groq/xAI/Perplexity/HuggingFace/GitLab/GitHub fine-grained/SendGrid key prefixes, non-HTTP URL credentials (`postgres://`, `redis://`), AWS presigned-URL parameters, `Authorization: Basic/Digest`, special-character passwords, and truncated PEM blocks now all redact. The cooldown failure reason and the failover aggregate error — both persisted — now pass through redaction like the event log already did.
+- User classifier keywords are escaped before regex compilation: a persisted keyword like `C++` or `(a+)+` previously broke routing on every request (SyntaxError) or hung the process (catastrophic backtracking). Persisted `classifier-rules.json` is also shape-validated on load.
+- Config/state maps keyed by YAML/JSON names now reject `__proto__`/`prototype`/`constructor` keys, preventing silent prototype mutation of profile, budget, and usage maps.
+- LLM adjudication hardening: the user request is delimited and marked as data (prompt-injection tier steering), verbose adjudicator replies parse the last tier word instead of the first (negation safety), and the reply buffer is capped at 4096 chars.
 
 
 ## [0.4.2] - 2026-08-11
