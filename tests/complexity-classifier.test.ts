@@ -4,6 +4,7 @@ import {
 	MULTI_STEP_KEYWORDS,
 	classifyComplexity,
 	resolveClassifierLists,
+	sanitizeClassifierOverrides,
 	type ClassifyComplexityInput,
 } from "../src/core/complexity-classifier";
 import type { IntentResult, ShortcutResult } from "../src/core/types";
@@ -584,5 +585,48 @@ describe("classifyComplexity — user rule overrides", () => {
 		expect(merged.multiStep).not.toBe(MULTI_STEP_KEYWORDS);
 		expect(merged.multiStep).toContain("造轮子");
 		expect(merged.multiStep.length).toBe(MULTI_STEP_KEYWORDS.length + 1);
+	});
+
+	test("override keywords with regex metacharacters are treated literally, never throw", () => {
+		const overrides = { add: { multiStepWord: ["C++", "(a+)+", "design["] } };
+		expect(() => resolveClassifierLists(overrides)).not.toThrow();
+		expect(() =>
+			classifyComplexity(
+				input({ prompt: "refactor the C++ parser (a+)+ design[ module", intent: CODE_INTENT, estimatedTokens: 500, overrides }),
+			),
+		).not.toThrow();
+		// Metachar terms are literal: `(a+)+` never compiles to a backtracking
+		// regex, so a long `aaaa…` run is safe, and `C++` doesn't match `C`.
+		const lists = resolveClassifierLists(overrides);
+		const wordRes = lists.multiStepWordRes;
+		expect(wordRes.some((re) => re.test("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))).toBe(false);
+		expect(wordRes.some((re) => re.test("rewrite the c module"))).toBe(false);
+		// A plain added word still matches after escaping.
+		const merged = resolveClassifierLists({ add: { multiStepWord: ["orchestrate"] } });
+		expect(merged.multiStepWordRes.some((re) => re.test("orchestrate the rollout"))).toBe(true);
+	});
+});
+
+describe("sanitizeClassifierOverrides", () => {
+	test("drops garbage shapes, keeps valid add/remove string lists", () => {
+		const clean = sanitizeClassifierOverrides({
+			add: { multiStep: ["ok", 42, null], bogus: ["x"], multiStepWord: "nope" },
+			remove: "not-an-object",
+			extra: 1,
+		});
+		expect(clean).toEqual({ add: { multiStep: ["ok"] } });
+	});
+
+	test("non-object input degrades to empty overrides", () => {
+		expect(sanitizeClassifierOverrides(undefined)).toEqual({});
+		expect(sanitizeClassifierOverrides(null)).toEqual({});
+		expect(sanitizeClassifierOverrides("junk")).toEqual({});
+		expect(sanitizeClassifierOverrides([1, 2])).toEqual({});
+		expect(sanitizeClassifierOverrides({ add: { multiStep: [] } })).toEqual({});
+	});
+
+	test("valid overrides pass through unchanged", () => {
+		const raw = { add: { multiStep: ["造轮子"] }, remove: { repairDebug: ["fix"] } };
+		expect(sanitizeClassifierOverrides(raw)).toEqual(raw);
 	});
 });

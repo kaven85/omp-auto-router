@@ -50,6 +50,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Keys that would mutate a plain object's prototype if assigned into a
+ * parser-built map. Rejected with a validation error during parsing and
+ * skipped silently during layer merges (defense-in-depth).
+ */
+function isUnsafeKey(key: string): boolean {
+	return key === "__proto__" || key === "prototype" || key === "constructor";
+}
+
 function isNonEmptyString(value: unknown): value is string {
 	return typeof value === "string" && value.length > 0;
 }
@@ -328,6 +337,10 @@ function parseProfile(raw: unknown, path: string, errors: string[]): ProfileConf
 		} else {
 			const budgets: Record<string, BudgetLimit> = {};
 			for (const [provider, budgetRaw] of Object.entries(raw.budgets)) {
+				if (isUnsafeKey(provider)) {
+					errors.push(`${path}.budgets.${provider}: unsafe key "${provider}" rejected`);
+					continue;
+				}
 				const parsed = parseBudgetLimit(budgetRaw, `${path}.budgets.${provider}`, errors);
 				if (parsed !== undefined) budgets[provider] = parsed;
 			}
@@ -384,6 +397,10 @@ export function parseRouterConfig(yamlText: string): ConfigLoadResult {
 			errors.push("profiles: must define at least one profile");
 		}
 		for (const [name, profileRaw] of Object.entries(raw.profiles)) {
+			if (isUnsafeKey(name)) {
+				errors.push(`profiles.${name}: unsafe key "${name}" rejected`);
+				continue;
+			}
 			const parsed = parseProfile(profileRaw, `profiles.${name}`, errors);
 			if (parsed !== undefined) profiles[name] = parsed;
 		}
@@ -407,6 +424,10 @@ export function parseRouterConfig(yamlText: string): ConfigLoadResult {
 		} else {
 			const parsedAliases: Record<string, string[]> = {};
 			for (const [alias, value] of Object.entries(raw.aliases)) {
+				if (isUnsafeKey(alias)) {
+					errors.push(`aliases.${alias}: unsafe key "${alias}" rejected`);
+					continue;
+				}
 				if (isStringArray(value)) {
 					parsedAliases[alias] = [...value];
 				} else {
@@ -464,7 +485,10 @@ export function mergeRouterConfigs(...layers: (RouterConfig | undefined)[]): Rou
 	const merged: RouterConfig = { profiles: {} };
 	for (const layer of layers) {
 		if (layer === undefined) continue;
-		Object.assign(merged.profiles, layer.profiles);
+		for (const [name, profile] of Object.entries(layer.profiles)) {
+			if (isUnsafeKey(name)) continue;
+			merged.profiles[name] = profile;
+		}
 		if (layer.active !== undefined) merged.active = layer.active;
 		if (layer.aliases !== undefined) merged.aliases = layer.aliases;
 		if (layer.activate !== undefined) merged.activate = layer.activate;

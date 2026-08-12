@@ -22,7 +22,7 @@ import { registerCommands } from "./commands";
 import { createStreamHandler, renderWidget } from "./router";
 import { createHostPorts, quotaRefreshMs } from "./host-ports";
 import type { OmpExtensionApi, OmpExtensionContext, OmpProviderConfig } from "./omp-api";
-import { pickSafeEvent, redactSecrets } from "./redact";
+import { pickSafeEvent, redactSecrets } from "../core/redact";
 import type { RoutingDecision } from "../core/types";
 
 /** Placeholder endpoint/key: the virtual provider never sends requests itself. */

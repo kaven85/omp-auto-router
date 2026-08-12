@@ -5,7 +5,7 @@
 
 import { BudgetTracker } from "../core/budget-tracker";
 import { CircuitBreaker } from "../core/circuit-breaker";
-import type { ClassifierOverrides } from "../core/complexity-classifier";
+import { sanitizeClassifierOverrides, type ClassifierOverrides } from "../core/complexity-classifier";
 import { DecisionStore } from "../core/decision-store";
 import { EventLog } from "../core/event-log";
 import { FeedbackTracker } from "../core/feedback-tracker";
@@ -166,7 +166,7 @@ export function createAdapterState(
 		cooldowns: new Map(),
 		testFailureAt: undefined,
 		ratings: new FeedbackTracker(ratingsStore),
-		classifierOverrides: stateStore.readJson<ClassifierOverrides>("classifier-rules.json") ?? {},
+		classifierOverrides: sanitizeClassifierOverrides(stateStore.readJson("classifier-rules.json")),
 		sessionUsage: { calls: new Map(), cost: new Map(), thinking: new Map() },
 	};
 }

@@ -75,6 +75,25 @@ function assemble(results: ReadonlyArray<readonly [label: string, layer: "user" 
 			errors.push(`${label}: ${result.errors.join("; ")}`);
 		}
 		if (result.config) {
+			if (layer === "project") {
+				let stripped = 0;
+				for (const profile of Object.values(result.config.profiles)) {
+					for (const tier of Object.values(profile.tiers)) {
+						if (!tier) continue;
+						for (const target of tier.targets) {
+							if (target.balanceEndpoint !== undefined) {
+								delete target.balanceEndpoint;
+								stripped++;
+							}
+						}
+					}
+				}
+				if (stripped > 0) {
+					errors.push(
+						`${label}: balanceEndpoint is only honored from the user config layer; stripped ${stripped} target override(s)`,
+					);
+				}
+			}
 			layers.push(layer);
 			parts.push(result.config);
 		}

@@ -369,6 +369,30 @@ export function baseClassifierList(name: ClassifierListName): readonly string[] 
 	}
 }
 
+/**
+ * Validate persisted overrides (classifier-rules.json) before use. Keeps only
+ * known list names whose add/remove values are arrays of strings; anything
+ * else is dropped so a hand-edited or corrupt file degrades to empty
+ * overrides instead of being trusted blindly.
+ */
+export function sanitizeClassifierOverrides(raw: unknown): ClassifierOverrides {
+	if (!raw || typeof raw !== "object") return {};
+	const out: ClassifierOverrides = {};
+	for (const kind of ["add", "remove"] as const) {
+		const bucket = (raw as Record<string, unknown>)[kind];
+		if (!bucket || typeof bucket !== "object" || Array.isArray(bucket)) continue;
+		const clean: Partial<Record<ClassifierListName, string[]>> = {};
+		for (const name of CLASSIFIER_LIST_NAMES) {
+			const list = (bucket as Record<string, unknown>)[name];
+			if (!Array.isArray(list)) continue;
+			const strings = list.filter((k): k is string => typeof k === "string");
+			if (strings.length > 0) clean[name] = strings;
+		}
+		if (Object.keys(clean).length > 0) out[kind] = clean;
+	}
+	return out;
+}
+
 /** True when the overrides object carries no add/remove entries at all. */
 export function overridesEmpty(overrides: ClassifierOverrides | undefined): boolean {
 	if (!overrides) return true;
@@ -393,7 +417,11 @@ export function resolveClassifierLists(overrides?: ClassifierOverrides): Classif
 	if (overridesEmpty(overrides)) return BASE_LISTS;
 	const o = overrides!;
 	const word = (name: ClassifierListName) =>
-		mergeWordList(baseClassifierList(name), o, name).map((term) => new RegExp(`\\b${term}\\b`));
+		// Escape regex metacharacters so user keywords like `C++` match
+		// literally instead of throwing a SyntaxError or enabling ReDoS.
+		mergeWordList(baseClassifierList(name), o, name).map(
+			(term) => new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`),
+		);
 	return {
 		multiStep: mergeWordList(MULTI_STEP_KEYWORDS, o, "multiStep"),
 		multiStepWordRes: word("multiStepWord"),

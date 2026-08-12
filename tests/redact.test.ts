@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { pickSafeEvent, redactSecrets } from "../../src/omp-adapter/redact";
+import { pickSafeEvent, redactSecrets } from "../src/core/redact";
 
 describe("redactSecrets", () => {
 	test("scrubs a Bearer token", () => {
@@ -39,6 +39,50 @@ describe("redactSecrets", () => {
 	test("never throws and returns benign text unchanged", () => {
 		expect(redactSecrets("plain error message")).toBe("plain error message");
 		expect(redactSecrets("")).toBe("");
+	});
+
+	test("scrubs compound labels with underscore prefixes (aws_secret_access_key)", () => {
+		const aws = "aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+		expect(redactSecrets(aws)).not.toContain("wJalrXUtnFEMI");
+		expect(redactSecrets("db_password=Sup3rSecretLongPwd")).not.toContain("Sup3rSecretLongPwd");
+	});
+
+	test("scrubs LLM/cloud provider key prefixes", () => {
+		expect(redactSecrets("gsk_AbCdEfGhIjKlMnOpQrStUvWxYz")).not.toContain("AbCdEfGhIjKlMnOp");
+		expect(redactSecrets("pplx-abcdef0123456789abcdef")).not.toContain("abcdef0123456789");
+		expect(redactSecrets("xai-abcdef0123456789abcdef")).not.toContain("abcdef0123456789");
+		expect(redactSecrets("hf_abcdef0123456789abcdef")).not.toContain("abcdef0123456789");
+		expect(redactSecrets("glpat-abcdef0123456789ab")).not.toContain("abcdef0123456789");
+		expect(redactSecrets("gho_abcdef0123456789abcdef")).not.toContain("abcdef0123456789");
+		expect(redactSecrets("SG.abcdef0123456789abcdef.abcdef0123456789abcdef0123456789abcdef0")).not.toContain("abcdef0123456789");
+	});
+
+	test("scrubs credentials in non-HTTP URL schemes", () => {
+		expect(redactSecrets("postgres://admin:hunter2secret@db.internal:5432/app")).not.toContain("hunter2secret");
+		expect(redactSecrets("redis://:longredispassword@cache:6379")).not.toContain("longredispassword");
+		expect(redactSecrets("mongodb+srv://u:mongopassword@cluster/x")).not.toContain("mongopassword");
+	});
+
+	test("scrubs labeled secrets with shell-special characters", () => {
+		expect(redactSecrets('password: "p@ss!word-2024xyz"')).not.toContain("p@ss!word");
+		expect(redactSecrets("password=abc!defghijklmn")).not.toContain("defghijklmn");
+	});
+
+	test("scrubs Authorization Basic credentials", () => {
+		expect(redactSecrets("Authorization: Basic dXNlcjpwYXNzd29yZA")).not.toContain("dXNlcjpwYXNzd29yZA");
+	});
+
+	test("scrubs AWS presigned-URL and session query parameters", () => {
+		const url = "https://s3.example.com/b/k?X-Amz-Signature=abc123def456&X-Amz-Credential=AKIAEXAMPLE%2F20240101&session=sessiontoken123";
+		const out = redactSecrets(url);
+		expect(out).not.toContain("abc123def456");
+		expect(out).not.toContain("sessiontoken123");
+		expect(out).not.toContain("AKIAEXAMPLE");
+	});
+
+	test("scrubs truncated PEM blocks", () => {
+		const truncated = "error: -----BEGIN PRIVATE KEY-----\nMIIEowIBAAKCAQEA1234567890abcdef\nMIIEowIBAAKCAQEA1234567890abcdef";
+		expect(redactSecrets(truncated)).not.toContain("MIIEowIBAAKCAQEA");
 	});
 });
 

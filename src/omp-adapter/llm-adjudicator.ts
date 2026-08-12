@@ -18,6 +18,12 @@ import type { AdapterState } from "./state";
 /** Bounded wait for the adjudication stream; the real request is waiting. */
 const ADJUDICATION_TIMEOUT_MS = 15_000;
 
+/**
+ * Cap on accumulated reply text — a runaway or hostile stream must not grow
+ * memory unbounded; the tier word arrives in the first bytes anyway.
+ */
+const ADJUDICATION_MAX_CHARS = 4_096;
+
 export function adjudicationEnabled(): boolean {
 	const raw = process.env.OMP_AUTO_ROUTER_LLM_ADJUDICATE;
 	return raw !== "0" && raw !== "false";
@@ -73,7 +79,9 @@ export async function adjudicateTier(
 		let text = "";
 		for await (const event of stream) {
 			const e = event as { type?: unknown; delta?: unknown };
-			if (e.type === "text_delta" && typeof e.delta === "string") text += e.delta;
+			if (e.type === "text_delta" && typeof e.delta === "string" && text.length < ADJUDICATION_MAX_CHARS) {
+				text += e.delta;
+			}
 		}
 		const tier = parseAdjudicationResponse(text);
 		if (tier === undefined) return undefined;

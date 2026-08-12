@@ -8,6 +8,7 @@
  * untouched and failover is over.
  */
 
+import { redactSecrets } from "./redact";
 import type {
 	FailoverHooks,
 	RouteTarget,
@@ -265,7 +266,9 @@ export async function* failoverStream(
 	}
 
 	throw new Error(
-		`failoverStream: all ${attempted.length} candidate(s) failed (${attempted.join(" -> ")}): ${extractMessage(lastError) ?? String(lastError)}`,
+		redactSecrets(
+			`failoverStream: all ${attempted.length} candidate(s) failed (${attempted.join(" -> ")}): ${extractMessage(lastError) ?? String(lastError)}`,
+		),
 		{ cause: lastError },
 	);
 }

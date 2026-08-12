@@ -122,6 +122,22 @@ describe("llm adjudicator", () => {
 		expect(result).toBeUndefined();
 	});
 
+	test("accumulated reply is capped at 4096 chars", async () => {
+		const { state } = setup();
+		streamBehavior = async function* () {
+			// First chunk fills past the cap; the tier word after it must be dropped.
+			yield { type: "text_delta", delta: "x".repeat(5_000) };
+			yield { type: "text_delta", delta: " complex" };
+		};
+		const result = await adjudicateTier(
+			state,
+			NO_AUTH,
+			{ provider: "anthropic", model: "sonnet" },
+			"帮我设计并实现一个登录功能",
+		);
+		expect(result).toBeUndefined();
+	});
+
 	test("stream errors fail open", async () => {
 		const { state } = setup();
 		streamBehavior = async function* () {

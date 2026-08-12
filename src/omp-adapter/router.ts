@@ -30,7 +30,7 @@ import { enrichCandidates, createHostPorts, quotaRefreshMs } from "./host-ports"
 import { adjudicationEnabled, adjudicateTier, pickAdjudicatorTarget } from "./llm-adjudicator";
 import type { OmpExtensionApi, OmpExtensionContext } from "./omp-api";
 import { fetchProviderBalance, resolveBalanceEndpoint, resolveThinkingCap } from "./provider-registry";
-import { redactSecrets } from "./redact";
+import { redactSecrets } from "../core/redact";
 
 /** Default transient exclusion window after a target fails within a failover chain. */
 const DEFAULT_COOLDOWN_AFTER_FAILURE_MS = 60_000;
@@ -622,7 +622,7 @@ export function createStreamHandler(
 				// minutes so subsequent requests skip it instead of rediscovering
 				// the failure on every prompt. The reason is surfaced in the
 				// "no eligible candidates" error so the cause stays visible.
-				state.cooldowns.set(key, { until: Date.now() + cooldownAfterFailureMs(), reason: formatError(error) });
+				state.cooldowns.set(key, { until: Date.now() + cooldownAfterFailureMs(), reason: redactSecrets(formatError(error)) });
 				state.eventLog.append({
 					type: "error",
 					at: Date.now(),

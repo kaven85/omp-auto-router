@@ -44,6 +44,11 @@ function isFiniteNumber(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value);
 }
 
+/** Keys that would mutate a plain object's prototype if assigned into a map — always dropped. */
+function isUnsafeKey(key: string): boolean {
+	return key === "__proto__" || key === "prototype" || key === "constructor";
+}
+
 /** Daily usage buckets are retained for this many days; monthly rollups are kept indefinitely. */
 export const DAILY_RETENTION_DAYS = 62;
 
@@ -68,12 +73,12 @@ function sanitizeBuckets(value: unknown): Record<string, Record<string, Provider
 		return buckets;
 	}
 	for (const [key, perProvider] of Object.entries(value)) {
-		if (typeof perProvider !== "object" || perProvider === null) {
+		if (isUnsafeKey(key) || typeof perProvider !== "object" || perProvider === null) {
 			continue;
 		}
 		const valid: Record<string, ProviderUsageStats> = {};
 		for (const [provider, stats] of Object.entries(perProvider)) {
-			if (isUsageStats(stats)) {
+			if (!isUnsafeKey(provider) && isUsageStats(stats)) {
 				valid[provider] = stats;
 			}
 		}
@@ -104,6 +109,7 @@ function loadLimits(store: LimitsStore): Record<string, BudgetLimit> {
 		}
 		const limits: Record<string, BudgetLimit> = {};
 		for (const [provider, limit] of Object.entries(raw)) {
+			if (isUnsafeKey(provider)) continue;
 			if (typeof limit === "object" && limit !== null && isFiniteNumber(limit.amount)) {
 				limits[provider] = limit;
 			}
@@ -122,6 +128,9 @@ function accumulate(
 	delta: { inputTokens: number; outputTokens: number; cost: number },
 	nowMs: number,
 ): void {
+	// Provider names flow in from runtime routing, not just validated config —
+	// never let one become a prototype mutation on the bucket maps.
+	if (isUnsafeKey(key) || isUnsafeKey(provider)) return;
 	const perProvider = buckets[key] ?? (buckets[key] = {});
 	const stats = perProvider[provider] ?? { inputTokens: 0, outputTokens: 0, cost: 0, updatedAt: nowMs };
 	stats.inputTokens += delta.inputTokens;

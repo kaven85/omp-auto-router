@@ -26,7 +26,7 @@ export function quotaRefreshMs(): number {
 	return Number.isFinite(parsed) && parsed >= 10_000 ? parsed : QUOTA_REFRESH_MS;
 }
 import type { OmpExtensionApi, OmpExtensionContext, OmpModel } from "./omp-api";
-import { redactSecrets } from "./redact";
+import { redactSecrets } from "../core/redact";
 
 export function createHostPorts(
 	pi: OmpExtensionApi,

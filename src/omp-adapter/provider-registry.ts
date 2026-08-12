@@ -100,7 +100,8 @@ export function resolveThinkingCap(target: RouteTarget): ThinkingCap | undefined
 /**
  * Fetch a provider's remaining balance via its resolved endpoint.
  * Best-effort: any failure (no model, no key, network, shape) yields
- * undefined so callers can render "unknown".
+ * undefined so callers can render "unknown". The request carries a 10s
+ * timeout so a hung endpoint cannot block the caller.
  */
 export async function fetchProviderBalance(
 	ctx: OmpExtensionContext,
@@ -116,6 +117,7 @@ export async function fetchProviderBalance(
 		if (!apiKey) return undefined;
 		const response = await fetch(endpoint, {
 			headers: { Authorization: `Bearer ${apiKey}` },
+			signal: AbortSignal.timeout(10_000),
 		});
 		if (!response.ok) return undefined;
 		const payload: unknown = await response.json();
