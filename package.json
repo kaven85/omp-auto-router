@@ -1,6 +1,6 @@
 {
 	"name": "omp-auto-router",
-	"version": "0.5.0",
+	"version": "0.6.0",
 	"description": "Profile-based, complexity-aware auto router extension for OMP and Pi",
 	"type": "module",
 	"private": true,
