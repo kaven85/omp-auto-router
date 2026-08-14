@@ -14,7 +14,8 @@ import { LatencyTracker } from "../core/latency-tracker";
 import { ProfileRegistry } from "../core/profile-registry";
 import type { HostPorts } from "../core/host-ports";
 import type { BudgetLimit, RouterConfig, RoutingDecision, QuotaSnapshot } from "../core/types";
-import type { ProviderBalance } from "./provider-registry";
+import type { ProviderBalance } from "../runtime/provider-dictionary";
+import { cooldownAfterFailureMs } from "../runtime/env";
 import type { OmpExtensionContext, OmpModel } from "./omp-api";
 
 export function collectProfileBudgets(config: RouterConfig): Record<string, BudgetLimit> {
@@ -93,6 +94,10 @@ export interface AdapterState {
 	balanceCache: Record<string, ProviderBalance>;
 	/** "provider/model" → transient post-failure exclusion (expiry + the failure that caused it). */
 	cooldowns: Map<string, { until: number; reason: string }>;
+	/** Post-failure target exclusion window, resolved from the env chain at boot. */
+	cooldownAfterFailureMs: number;
+	/** Last rendered widget payload; identical re-renders are suppressed (instance-local). */
+	widgetPayload?: string;
 	/** Epoch ms of the most recent test/build tool failure; drives temporary tier escalation. */
 	testFailureAt: number | undefined;
 	/** User ratings of routing decisions. */
@@ -164,6 +169,7 @@ export function createAdapterState(
 		balanceCache: {},
 		quotaCache: { at: 0, data: [] },
 		cooldowns: new Map(),
+		cooldownAfterFailureMs: cooldownAfterFailureMs(),
 		testFailureAt: undefined,
 		ratings: new FeedbackTracker(ratingsStore),
 		classifierOverrides: sanitizeClassifierOverrides(stateStore.readJson("classifier-rules.json")),

@@ -12,18 +12,20 @@
  * ExtensionAPI surface; failures degrade to warnings, never crashes.
  */
 
-import * as os from "node:os";
 import * as path from "node:path";
 
 import type { AdapterState } from "./state";
 import { createAdapterState, refreshModels, collectProfileBudgets, persistTrackers } from "./state";
 import { agentDir, loadAdapterConfigSync } from "./config";
 import { registerCommands } from "./commands";
-import { createStreamHandler, renderWidget } from "./router";
-import { createHostPorts, quotaRefreshMs } from "./host-ports";
+import { createStreamHandler } from "./router";
+import { createHostPorts } from "./host-ports";
 import type { OmpExtensionApi, OmpExtensionContext, OmpProviderConfig } from "./omp-api";
 import { pickSafeEvent, redactSecrets } from "../core/redact";
 import type { RoutingDecision } from "../core/types";
+import { matchPathActivation } from "../runtime/activation";
+import { quotaRefreshMs } from "../runtime/env";
+import { renderRouterWidget } from "../runtime/widget";
 import { LEGACY_OMP_DECISION_ENTRY, ROUTER_DECISION_ENTRY } from "../runtime/router-runtime";
 
 /** Placeholder endpoint/key: the virtual provider never sends requests itself. */
@@ -63,7 +65,7 @@ export async function refreshQuotaAndRender(
 	try {
 		const snapshots = await host.fetchQuota([...providers]);
 		current.quotaCache = { at: Date.now(), data: snapshots };
-		renderWidget(current, host, current.lastDecision?.decision);
+		renderRouterWidget(current, (lines) => host.setWidget(lines), current.lastDecision?.decision);
 	} catch {
 		// best-effort background refresh; request-path refresh retries
 	}
@@ -202,7 +204,7 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 		restoreDecisions(current, ctx);
 
 		// ── Path-scoped profile activation (activate:) ──────────────────────
-		const pathProfile = matchPathActivation(current, ctx.cwd);
+		const pathProfile = matchPathActivation(current.config, ctx.cwd);
 		if (pathProfile) {
 			const activeModel = ctx.models.current();
 			const already = activeModel?.provider === "auto-router" && activeModel.id === pathProfile;
@@ -303,23 +305,4 @@ function restoreDecisions(state: AdapterState, ctx: OmpExtensionContext): void {
 		}
 	}
 	if (prior.length > 0) state.decisions.restore(prior);
-}
-
-/** Longest `activate[].path` prefix of cwd, `~` expanded; undefined when none match. */
-function matchPathActivation(state: AdapterState, cwd: string): string | undefined {
-	const entries = state.config.activate;
-	if (!entries || entries.length === 0) return undefined;
-	let best: { len: number; profile: string } | undefined;
-	for (const entry of entries) {
-		if (!state.config.profiles[entry.profile]) continue;
-		const expanded = entry.path.replace(/^~(?=\/|$)/, os.homedir());
-		const prefix = expanded.replace(/\/+$/, "");
-		if (prefix.length === 0) continue;
-		if (cwd === prefix || cwd.startsWith(`${prefix}/`)) {
-			if (best === undefined || prefix.length > best.len) {
-				best = { len: prefix.length, profile: entry.profile };
-			}
-		}
-	}
-	return best?.profile;
 }

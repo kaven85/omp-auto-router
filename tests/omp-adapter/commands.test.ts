@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { formatQuotaTable, registerCommands } from "../../src/omp-adapter/commands";
+import { formatQuotaTable } from "../../src/runtime/commands";
+import { registerCommands } from "../../src/omp-adapter/commands";
 import { createAdapterState } from "../../src/omp-adapter/state";
 import type { RouterConfig } from "../../src/core/types";
 import type { ClassifierOverrides } from "../../src/core/complexity-classifier";
@@ -89,7 +90,7 @@ describe("adapter commands", () => {
 		const { api, invoke, notifies } = setup();
 		await invoke("use economy");
 		expect(api.modelSwitches).toEqual(["auto-router/economy"]);
-		expect(api.entries.some((e) => e.customType === "com.omp.auto-router.state" && (e.data as { profile?: string })?.profile === "economy")).toBe(true);
+		expect(api.entries.some((e) => e.customType === "com.auto-router.v1.state" && (e.data as { profile?: string })?.profile === "economy")).toBe(true);
 		expect(notifies.join("\n")).toContain("economy");
 	});
 
@@ -347,7 +348,7 @@ describe("adapter commands", () => {
 			expect(labels).toContain(sub);
 		}
 		expect(items!.every((i) => i.value.endsWith(" "))).toBe(true);
-		expect(items!.find((i) => i.label === "doctor")!.description).toContain("H1");
+		expect(items!.find((i) => i.label === "doctor")!.description).toContain("宿主能力探测");
 		expect(items!.find((i) => i.label === "use")!.hint).toBe("<profile|alias>");
 		expect(items!.find((i) => i.label === "budget")!.hint).toBe("show|set <p> <usd> [monthly]|clear <p>");
 	});

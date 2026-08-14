@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-	fetchProviderBalance,
 	PROVIDER_REGISTRY,
 	resolveBalanceEndpoint,
 	resolveThinkingCap,
-} from "../../src/omp-adapter/provider-registry";
+} from "../../src/runtime/provider-dictionary";
+import { fetchOmpBalance } from "../../src/omp-adapter/balance";
 import type { RouteTarget } from "../../src/core/types";
 
 function target(provider: string, balanceEndpoint?: string): RouteTarget {
@@ -63,7 +63,7 @@ describe("provider registry", () => {
 		expect(parse?.({ unexpected: true })).toBeUndefined();
 	});
 
-	test("fetchProviderBalance posts the bearer key and parses the payload", async () => {
+	test("fetchOmpBalance posts the bearer key and parses the payload", async () => {
 		const originalFetch = globalThis.fetch;
 		let seenAuth: string | undefined;
 		globalThis.fetch = (async (_url: unknown, init?: { headers?: Record<string, string> }) => {
@@ -76,7 +76,7 @@ describe("provider registry", () => {
 				modelRegistry: { getApiKey: async () => "sk-test" },
 			};
 			const state = { modelsByKey: new Map() };
-			const balance = await fetchProviderBalance(
+			const balance = await fetchOmpBalance(
 				ctx as never,
 				state as never,
 				"acme",
@@ -89,7 +89,7 @@ describe("provider registry", () => {
 		}
 	});
 
-	test("fetchProviderBalance degrades to undefined on http failure", async () => {
+	test("fetchOmpBalance degrades to undefined on http failure", async () => {
 		const originalFetch = globalThis.fetch;
 		globalThis.fetch = (async () => new Response("nope", { status: 500 })) as unknown as typeof fetch;
 		try {
@@ -97,7 +97,7 @@ describe("provider registry", () => {
 				models: { list: () => [{ provider: "acme", id: "m" }] },
 				modelRegistry: { getApiKey: async () => "sk-test" },
 			};
-			const balance = await fetchProviderBalance(
+			const balance = await fetchOmpBalance(
 				ctx as never,
 				{ modelsByKey: new Map() } as never,
 				"acme",

@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { describe, expect, mock, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,13 +16,13 @@ mock.module("@oh-my-pi/pi-ai", () => ({
 	},
 }));
 
-const { adjudicationEnabled, adjudicateTier, pickAdjudicatorTarget } = await import(
+const { adjudicateTier } = await import(
 	"../../src/omp-adapter/llm-adjudicator"
 );
 const { createAdapterState } = await import("../../src/omp-adapter/state");
 const { MockExtensionApi } = await import("./mock-omp");
 import type { OmpModel } from "../../src/omp-adapter/omp-api";
-import type { RouterConfig, RoutingDecision } from "../../src/core/types";
+import type { RouterConfig } from "../../src/core/types";
 
 const CONFIG: RouterConfig = {
 	active: "premium",
@@ -51,49 +51,10 @@ function setup() {
 	const state = createAdapterState(CONFIG, dir, "/tmp/work");
 	state.ctx = api.makeCtx();
 	streamBehavior = async function* () {};
-	return { state, dir };
-}
-
-function decisionWithTarget(provider: string, model: string): RoutingDecision {
-	return {
-		profile: "premium",
-		tier: "standard",
-		confidence: 0.9,
-		target: { provider, model },
-		orderedCandidates: [{ provider, model }],
-		reasoning: [],
-		estimatedTokens: 100,
-		hints: {} as never,
-		decidedAt: Date.now(),
-	};
+	return { state };
 }
 
 describe("llm adjudicator", () => {
-	afterEach(() => {
-		delete process.env.OMP_AUTO_ROUTER_LLM_ADJUDICATE;
-	});
-
-	test("enabled by default; 0/false disables", () => {
-		expect(adjudicationEnabled()).toBe(true);
-		process.env.OMP_AUTO_ROUTER_LLM_ADJUDICATE = "0";
-		expect(adjudicationEnabled()).toBe(false);
-		process.env.OMP_AUTO_ROUTER_LLM_ADJUDICATE = "false";
-		expect(adjudicationEnabled()).toBe(false);
-		process.env.OMP_AUTO_ROUTER_LLM_ADJUDICATE = "1";
-		expect(adjudicationEnabled()).toBe(true);
-	});
-
-	test("fresh session adjudicates with the standard-tier first target", () => {
-		const { state } = setup();
-		expect(pickAdjudicatorTarget(state, "premium")).toEqual({ provider: "anthropic", model: "sonnet" });
-	});
-
-	test("after a decision, adjudicates with the session's current model", () => {
-		const { state } = setup();
-		state.decisions.record(decisionWithTarget("anthropic", "opus"));
-		expect(pickAdjudicatorTarget(state, "premium")).toEqual({ provider: "anthropic", model: "opus" });
-	});
-
 	test("parses the tier word from the stream", async () => {
 		const { state } = setup();
 		streamBehavior = async function* () {

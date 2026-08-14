@@ -1,11 +1,10 @@
 /**
  * LLM adjudication (adapter side): when the keyword classifier flags a
- * mixed-phase prompt (`signals.mixedPhase`), ask the session's current LLM
- * to pick the tier. Fail-open: any error, timeout, or unparseable reply
- * keeps the heuristic decision.
- *
- * Env:
- * - OMP_AUTO_ROUTER_LLM_ADJUDICATE=0|false disables (default: on).
+ * mixed-phase prompt (`signals.mixedPhase`), the RouterRuntime asks the
+ * host to pick the tier via `RouterRuntimeHost.adjudicate`. The runtime
+ * owns enablement (env chain), adjudicator-target picking, and the
+ * fail-open contract; this module is only the OMP stream call.
+ * Fail-open: any error, timeout, or unparseable reply yields undefined.
  */
 
 import { streamSimple } from "@oh-my-pi/pi-ai";
@@ -23,25 +22,6 @@ const ADJUDICATION_TIMEOUT_MS = 15_000;
  * memory unbounded; the tier word arrives in the first bytes anyway.
  */
 const ADJUDICATION_MAX_CHARS = 4_096;
-
-export function adjudicationEnabled(): boolean {
-	const raw = process.env.OMP_AUTO_ROUTER_LLM_ADJUDICATE;
-	return raw !== "0" && raw !== "false";
-}
-
-/**
- * Pick the adjudicator model: "the current LLM" — the target of the last
- * routing decision this session; on a fresh session, the profile's
- * standard-tier first target (registry ladder handles sparse profiles).
- */
-export function pickAdjudicatorTarget(
-	state: AdapterState,
-	profileName: string,
-): RouteTarget | undefined {
-	const last = state.decisions.last();
-	if (last) return last.target;
-	return state.registry.tierConfig(profileName, "standard")?.targets[0];
-}
 
 export interface AdjudicationResult {
 	tier: ComplexityTier;

@@ -16,31 +16,16 @@ import { streamSimple } from "@oh-my-pi/pi-ai";
 import { isProviderRetryableError } from "@oh-my-pi/pi-ai/error";
 
 import { defaultIsRetryable } from "../core/failover-engine";
-import type { HostPorts } from "../core/host-ports";
 import { clampThinking } from "../core/thinking-cap";
-import type { QuotaSnapshot, RoutingDecision } from "../core/types";
 import type { AdapterState } from "./state";
 import { persistTrackers } from "./state";
 import { enrichCandidates, createHostPorts } from "./host-ports";
+import { fetchOmpBalance } from "./balance";
+import { adjudicateTier } from "./llm-adjudicator";
 import type { OmpExtensionApi, OmpExtensionContext } from "./omp-api";
-import { fetchProviderBalance, resolveBalanceEndpoint, resolveThinkingCap } from "./provider-registry";
+import { resolveBalanceEndpoint, resolveThinkingCap } from "../runtime/provider-dictionary";
+import { renderRouterWidget } from "../runtime/widget";
 import { ROUTER_DECISION_ENTRY, RouterRuntime, RouterRuntimeError, type RouterRuntimeHost } from "../runtime/router-runtime";
-
-/** Default transient exclusion window after a target fails within a failover chain. */
-const DEFAULT_COOLDOWN_AFTER_FAILURE_MS = 60_000;
-
-/**
- * Effective post-failure cooldown: `OMP_AUTO_ROUTER_COOLDOWN_MS` env override,
- * floored at 5s. Kept short by default — a cooled target with no fallback
- * leaves the profile with no eligible candidates.
- */
-export function cooldownAfterFailureMs(): number {
-	const raw = process.env.OMP_AUTO_ROUTER_COOLDOWN_MS;
-	if (raw === undefined) return DEFAULT_COOLDOWN_AFTER_FAILURE_MS;
-	const parsed = Number(raw);
-	return Number.isFinite(parsed) && parsed >= 5_000 ? parsed : DEFAULT_COOLDOWN_AFTER_FAILURE_MS;
-}
-
 
 /**
  * How long a request waits for `session_start` to land on the state before
@@ -51,84 +36,6 @@ export function cooldownAfterFailureMs(): number {
  */
 const CTX_READY_WAIT_MS = 5_000;
 
-
-function observedLatencySuffix(state: AdapterState, decision: RoutingDecision): string {
-	const key = `${decision.target.provider}/${decision.target.model}`;
-	const averageMs = state.latency.average(key);
-	if (averageMs === undefined) return "";
-	return ` | first output=${(averageMs / 1_000).toFixed(1)}s`;
-}
-
-/**
- * Compose the dashboard widget: decision line (when a decision exists) plus
- * live budget/circuit/UVI snapshots. UVI windows past their `resetsAt` are
- * shown as freshly reset — the cached fetch would otherwise keep displaying
- * the pre-reset usage until the next poll.
- */
-export function buildWidgetLines(state: AdapterState, decision?: RoutingDecision): string[] {
-	const lines: string[] = [];
-	if (decision !== undefined) {
-		const billing = decision.target.billing === "per-token" ? " (per-token)" : "";
-		lines.push(
-			`${decision.profile} | tier=${decision.tier} | ${decision.target.provider}/${decision.target.model}${billing}${decision.thinking !== undefined ? ` | ${decision.thinking}` : ""}${observedLatencySuffix(state, decision)}`,
-		);
-	}
-	const budgetBits: string[] = [];
-	for (const [provider, limit] of Object.entries(state.budgets.limits())) {
-		const bucket = limit.monthly ? state.budgets.usage(provider).monthly : state.budgets.usage(provider).daily;
-		const used = bucket?.cost ?? 0;
-		const pct = limit.amount > 0 ? Math.round((used / limit.amount) * 100) : 0;
-		budgetBits.push(`${provider} $${used.toFixed(2)}/$${limit.amount}${limit.monthly ? "/mo" : "/day"} (${pct}%)`);
-	}
-	if (budgetBits.length > 0) lines.push(`budgets: ${budgetBits.join(" · ")}`);
-	const openCircuits = Object.entries(state.circuit.snapshot())
-		.filter(([, rec]) => Date.now() - rec.openedAt < rec.cooldownMs)
-		.map(([key, rec]) => `${key} (${rec.consecutiveFailures}x)`);
-	if (openCircuits.length > 0) lines.push(`circuit open: ${openCircuits.join(" · ")}`);
-	// UVI quota pacing: only the current provider's balance — the full
-	// per-provider breakdown lives in `/auto-router usage`.
-	const currentProvider = decision?.target.provider;
-	if (state.uviEnabled && currentProvider !== undefined) {
-		const nowMs = Date.now();
-		const uviBits = state.quotaCache.data
-			.filter((snapshot) => snapshot.provider === currentProvider)
-			.map((snapshot) => {
-				const worst = Math.max(
-					0,
-					...snapshot.windows.map((window) =>
-						window.resetsAt !== undefined && window.resetsAt <= nowMs ? 0 : window.usedFraction,
-					),
-				);
-				return `${snapshot.provider} ${(100 - worst * 100).toFixed(0)}% left`;
-			});
-		if (uviBits.length > 0) lines.push(`uvi: ${uviBits.join(" · ")}`);
-		const balance = state.balanceCache[currentProvider];
-		if (balance !== undefined) lines.push(`balance: ${currentProvider} ${balance.total} ${balance.currency}`);
-	}
-	return lines;
-}
-
-/** Last rendered widget payload; identical re-renders are suppressed. */
-let lastWidgetPayload: string | undefined;
-
-/**
- * Render the dashboard widget, skipping no-op updates. Shared by the request
- * path (new decision) and the background quota refresh (fresh UVI data) so
- * the widget reflects cache changes within one refresh cadence without
- * re-rendering when nothing changed.
- */
-export function renderWidget(
-	state: AdapterState,
-	host: Pick<HostPorts, "setWidget">,
-	decision?: RoutingDecision,
-): void {
-	const lines = buildWidgetLines(state, decision);
-	if (lines.length === 0) return;
-	const payload = lines.join("\n");
-	if (payload === lastWidgetPayload) return;
-	lastWidgetPayload = payload;
-	host.setWidget(lines);
-}
 
 export interface StreamArgs {
 	model: { provider: string; id: string };
@@ -175,10 +82,10 @@ export function createStreamHandler(
 				const targets = profile ? Object.values(profile.tiers).flatMap((tier) => tier?.targets ?? []) : [];
 				const endpoint = resolveBalanceEndpoint(decision.target.provider, targets);
 				if (endpoint) {
-					const balance = await fetchProviderBalance(ctx, state, decision.target.provider, endpoint);
+					const balance = await fetchOmpBalance(ctx, state, decision.target.provider, endpoint);
 					if (balance) state.balanceCache[decision.target.provider] = balance;
 				}
-				renderWidget(state, createHostPorts(pi, ctx, state), decision);
+				renderRouterWidget(state, (lines) => createHostPorts(pi, ctx, state).setWidget(lines), decision);
 			}
 		} catch (error) {
 			if (!(error instanceof RouterRuntimeError)) throw error;
@@ -209,6 +116,7 @@ function createOmpRuntimeHost(state: AdapterState, pi: OmpExtensionApi, ctx: Omp
 		isRetryable: (error) => isProviderRetryableError(error) || defaultIsRetryable(error),
 		clampThinking: (target, level) => clampThinking(level, resolveThinkingCap(target)),
 		persistDecision: (_type, decision) => pi.appendEntry(ROUTER_DECISION_ENTRY, decision),
+		adjudicate: (target, prompt, signal) => adjudicateTier(state, ports, target, prompt, signal),
 		setStatus: (text) => ports.setStatus(text),
 		fetchQuota: (providers) => ports.fetchQuota(providers),
 		now: () => Date.now(),

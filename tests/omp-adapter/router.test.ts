@@ -24,7 +24,9 @@ mock.module("@oh-my-pi/pi-ai/error", () => ({
 	isProviderRetryableError: (error: unknown) => retryableBehavior(error),
 }));
 
-const { createStreamHandler, buildWidgetLines, renderWidget, waitForSessionContext, cooldownAfterFailureMs } = await import("../../src/omp-adapter/router");
+const { createStreamHandler, waitForSessionContext } = await import("../../src/omp-adapter/router");
+const { buildWidgetLines, renderRouterWidget } = await import("../../src/runtime/widget");
+const { cooldownAfterFailureMs } = await import("../../src/runtime/env");
 const { createAdapterState } = await import("../../src/omp-adapter/state");
 const { refreshModels } = await import("../../src/omp-adapter/state");
 const { CircuitBreaker } = await import("../../src/core/circuit-breaker");
@@ -1190,15 +1192,15 @@ describe("widget rendering", () => {
 		const calls: string[][] = [];
 		const host = { setWidget: (lines: string[]) => calls.push(lines) };
 		const decision = decisionFor("dedupe-p");
-		renderWidget(state, host, decision);
-		renderWidget(state, host, decision);
+		renderRouterWidget(state, (lines) => host.setWidget(lines), decision);
+		renderRouterWidget(state, (lines) => host.setWidget(lines), decision);
 		expect(calls).toHaveLength(1);
 		// Fresh data changes the payload → renders again.
 		state.quotaCache = {
 			at: Date.now(),
 			data: [{ provider: "dedupe-p", fetchedAt: Date.now(), windows: [{ id: "7d", usedFraction: 0.5 }] }],
 		};
-		renderWidget(state, host, decision);
+		renderRouterWidget(state, (lines) => host.setWidget(lines), decision);
 		expect(calls).toHaveLength(2);
 		expect(calls[1]).toEqual(["main | tier=standard | dedupe-p/m", "uvi: dedupe-p 50% left"]);
 		rmSync(dir, { recursive: true, force: true });
