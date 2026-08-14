@@ -50,6 +50,22 @@ omp --extension /path/to/omp-auto-router
 
 ---
 
+## Pi 安装（Mode A）
+
+同一包同时声明 Pi extension；无需修改、patch 或复制 Pi/OMP 安装文件：
+
+```bash
+pi install /path/to/omp-auto-router
+# 或一次性验证
+pi -e /path/to/omp-auto-router
+```
+
+Pi 用户配置为 Pi agent directory 下的 `auto-router.yml`（通常为 `~/.pi/agent/auto-router.yml`，由 Pi 的公开 agent-directory helper 解析）；可信项目可在 `.pi/auto-router.yml` 覆盖。选择 `auto-router/<profile>` 后，请求会经 Pi 的有效模型注册表委托到配置的真实 target。若启用了 `--models` / `enabledModels`，它必须同时允许虚拟 profile 和全部真实 targets。
+
+Pi 通过公开 ModelRegistry/Provider 接口解析认证、headers、动态 base URL 和 provider environment；虚拟 Provider 的占位凭据不会上游发送。Pi 未公开 OMP 等价的 usage-report 接口，因此 UVI 显示为 unavailable；本地 budget、实际 usage/cost、冷却、熔断、延迟和 failover 不受影响。运行 `/auto-router doctor` 可查看该降级与缺失 target/scope/auth 的诊断。
+
+---
+
 ## 接入指引（从零到跑通）
 
 按顺序执行，每步都有可验证的结果；全部完成后插件即接管路由。

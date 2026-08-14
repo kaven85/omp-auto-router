@@ -1,20 +1,33 @@
 {
 	"name": "omp-auto-router",
 	"version": "0.5.0",
-	"description": "Profile-based, complexity-aware auto router extension for Oh My Pi (omp)",
+	"description": "Profile-based, complexity-aware auto router extension for OMP and Pi",
 	"type": "module",
 	"private": true,
+	"keywords": ["pi-package", "auto-router", "omp"],
+	"pi": {
+		"extensions": ["./src/pi-adapter/index.ts"]
+	},
 	"omp": {
 		"extensions": ["./src/omp-adapter/index.ts"]
 	},
 	"scripts": {
 		"test": "bun test tests/",
 		"test:adapter": "bun test tests/omp-adapter/",
+		"test:runtime": "bun test tests/runtime/",
+		"test:pi": "bun test tests/pi-adapter/",
 		"check": "bunx tsc --noEmit",
-		"check:adapter": "bunx tsc -p tsconfig.adapter.json --noEmit"
+		"check:runtime": "bunx tsc -p tsconfig.runtime.json --noEmit",
+		"check:adapter": "bunx tsc -p tsconfig.adapter.json --noEmit",
+		"check:pi": "bunx tsc -p tsconfig.pi-adapter.json --noEmit",
+		"verify": "bun run test && bun run check:runtime && bun run check:adapter && bun run check:pi"
 	},
 	"dependencies": {
 		"yaml": "^2.5.0"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*"
 	},
 	"devDependencies": {
 		"@earendil-works/pi-ai": "0.84.1",

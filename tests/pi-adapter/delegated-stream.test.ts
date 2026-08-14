@@ -87,6 +87,14 @@ describe("Pi public Mode A delegation seam", () => {
 		});
 	});
 
+	test("applies router-selected thinking only after virtual reasoning is removed", async () => {
+		const { registry, calls } = createRegistry();
+
+		await delegatePiTarget(registry, target, context, { reasoning: "low" }, { reasoning: "high" });
+
+		expect(calls[0]?.options).toMatchObject({ reasoning: "high", apiKey: "target-key" });
+	});
+
 	test("preserves cancellation and safe behavioral options while replacing virtual credentials", async () => {
 		const { registry, calls } = createRegistry();
 		const controller = new AbortController();

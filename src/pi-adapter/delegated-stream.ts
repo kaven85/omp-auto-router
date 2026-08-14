@@ -80,6 +80,8 @@ export async function delegatePiTarget(
 	target: PiTarget,
 	context: unknown,
 	options?: Record<string, unknown>,
+	/** Router-selected controls, applied only after virtual fields are removed. */
+	targetOptions?: Record<string, unknown>,
 ): Promise<AsyncIterable<unknown>> {
 	const capabilities = inspectPiModeACapabilities(registry);
 	if (!capabilities.supported) {
@@ -107,6 +109,7 @@ export async function delegatePiTarget(
 	const targetModel: PiPublicModel = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
 	return provider.streamSimple(targetModel, context, {
 		...withoutVirtualAuth(options),
+		...targetOptions,
 		...(auth.apiKey !== undefined ? { apiKey: auth.apiKey } : {}),
 		...(auth.headers !== undefined ? { headers: auth.headers } : {}),
 		...(auth.env !== undefined ? { env: auth.env } : {}),

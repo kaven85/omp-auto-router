@@ -10,5 +10,5 @@
 		"noEmit": true,
 		"types": ["bun"]
 	},
-	"include": ["src/core/**/*.ts", "src/runtime/**/*.ts", "src/pi-adapter/**/*.ts", "tests/pi-adapter/**/*.ts"]
+	"include": ["src/core/**/*.ts", "src/runtime/**/*.ts", "tests/runtime/**/*.ts"]
 }
