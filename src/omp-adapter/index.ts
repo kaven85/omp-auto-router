@@ -24,6 +24,7 @@ import { createHostPorts, quotaRefreshMs } from "./host-ports";
 import type { OmpExtensionApi, OmpExtensionContext, OmpProviderConfig } from "./omp-api";
 import { pickSafeEvent, redactSecrets } from "../core/redact";
 import type { RoutingDecision } from "../core/types";
+import { LEGACY_OMP_DECISION_ENTRY, ROUTER_DECISION_ENTRY } from "../runtime/router-runtime";
 
 /** Placeholder endpoint/key: the virtual provider never sends requests itself. */
 const VIRTUAL_BASE_URL = "http://127.0.0.1:0";
@@ -297,7 +298,7 @@ const TEST_COMMAND_RE =
 function restoreDecisions(state: AdapterState, ctx: OmpExtensionContext): void {
 	const prior: RoutingDecision[] = [];
 	for (const entry of ctx.sessionManager.getBranch()) {
-		if (entry.type === "custom" && entry.customType === "com.omp.auto-router.decision") {
+		if (entry.type === "custom" && (entry.customType === ROUTER_DECISION_ENTRY || entry.customType === LEGACY_OMP_DECISION_ENTRY)) {
 			prior.push(entry.data as RoutingDecision);
 		}
 	}

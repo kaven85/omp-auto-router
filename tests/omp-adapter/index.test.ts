@@ -165,7 +165,7 @@ describe("extension entry (boot + ctx adoption)", () => {
 			// routes to the complex-tier target.
 			expect(streamCalls).toEqual([{ provider: "anthropic", model: "sonnet" }]);
 			const decision = api.entries.find(
-				(e) => e.customType === "com.omp.auto-router.decision" && (e.data as { tier?: string })?.tier === "complex" && (e.data as { confidence?: number })?.confidence !== 0.9,
+				(e) => e.customType === "com.auto-router.v1.decision" && (e.data as { tier?: string })?.tier === "complex" && (e.data as { confidence?: number })?.confidence !== 0.9,
 			);
 			expect(decision).toBeDefined();
 		});

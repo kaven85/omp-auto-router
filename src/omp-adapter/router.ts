@@ -15,22 +15,16 @@
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { isProviderRetryableError } from "@oh-my-pi/pi-ai/error";
 
-import { failoverStream, defaultIsRetryable, defaultIsSubstantive, formatError } from "../core/failover-engine";
-import type { FeedbackTracker } from "../core/feedback-tracker";
+import { defaultIsRetryable } from "../core/failover-engine";
 import type { HostPorts } from "../core/host-ports";
-import { classifyComplexity } from "../core/complexity-classifier";
-import { classifyIntent } from "../core/intent-classifier";
-import { route } from "../core/pipeline";
-import { parseShortcut } from "../core/shortcut-parser";
 import { clampThinking } from "../core/thinking-cap";
-import type { ComplexityTier, QuotaSnapshot, RouteTarget, RoutingDecision, ThinkingLevel } from "../core/types";
+import type { QuotaSnapshot, RoutingDecision } from "../core/types";
 import type { AdapterState } from "./state";
 import { persistTrackers } from "./state";
-import { enrichCandidates, createHostPorts, quotaRefreshMs } from "./host-ports";
-import { adjudicationEnabled, adjudicateTier, pickAdjudicatorTarget } from "./llm-adjudicator";
+import { enrichCandidates, createHostPorts } from "./host-ports";
 import type { OmpExtensionApi, OmpExtensionContext } from "./omp-api";
 import { fetchProviderBalance, resolveBalanceEndpoint, resolveThinkingCap } from "./provider-registry";
-import { redactSecrets } from "../core/redact";
+import { ROUTER_DECISION_ENTRY, RouterRuntime, RouterRuntimeError, type RouterRuntimeHost } from "../runtime/router-runtime";
 
 /** Default transient exclusion window after a target fails within a failover chain. */
 const DEFAULT_COOLDOWN_AFTER_FAILURE_MS = 60_000;
@@ -47,31 +41,6 @@ export function cooldownAfterFailureMs(): number {
 	return Number.isFinite(parsed) && parsed >= 5_000 ? parsed : DEFAULT_COOLDOWN_AFTER_FAILURE_MS;
 }
 
-/**
- * Rating feedback loop (demote-only): candidates with enough ratings and a
- * low good fraction move behind the rest. Demotion is stable and never
- * removes a candidate — a badly rated target still serves as failover.
- */
-function demotePoorlyRated<T extends { provider: string; model: string }>(
-	order: readonly T[],
-	ratings: FeedbackTracker,
-): T[] {
-	const poorly = (t: T): boolean => {
-		const stats = ratings.statsFor(t.provider, t.model);
-		return stats.total >= RATING_MIN_SAMPLES && stats.goodFraction < RATING_DEMOTE_BELOW;
-	};
-	const front = order.filter((t) => !poorly(t));
-	const back = order.filter(poorly);
-	return back.length === 0 ? [...order] : [...front, ...back];
-}
-
-/** Minimum ratings before a candidate's good fraction is trusted. */
-const RATING_MIN_SAMPLES = 5;
-/** Good fraction below which a candidate is demoted. */
-const RATING_DEMOTE_BELOW = 0.4;
-
-/** How long a failed test/build command keeps the tier floor raised. */
-const TEST_FAILURE_ESCALATION_MS = 10 * 60_000;
 
 /**
  * How long a request waits for `session_start` to land on the state before
@@ -82,7 +51,6 @@ const TEST_FAILURE_ESCALATION_MS = 10 * 60_000;
  */
 const CTX_READY_WAIT_MS = 5_000;
 
-const TIER_LADDER = ["trivial", "simple", "standard", "complex"] as const;
 
 function observedLatencySuffix(state: AdapterState, decision: RoutingDecision): string {
 	const key = `${decision.target.provider}/${decision.target.model}`;
@@ -172,132 +140,81 @@ export interface StreamArgs {
 	options?: { signal?: AbortSignal; [k: string]: unknown };
 }
 
-/** Extract the last user message's text and whether it carries images. */
-function lastUserText(context: StreamArgs["context"]): { text: string; hasImages: boolean } {
-	for (let i = context.messages.length - 1; i >= 0; i--) {
-		const message = context.messages[i];
-		if (!message || message.role !== "user") continue;
-		const content = message.content;
-		const parts = Array.isArray(content) ? content : [];
-		const text = parts
-			.filter((p): p is { type: string; text?: string } => typeof p === "object" && p !== null && "text" in p)
-			.map((p) => p.text ?? "")
-			.join("");
-		const hasImages = parts.some((p) => typeof p === "object" && p !== null && (p as { type?: string }).type === "image");
-		return { text, hasImages };
-	}
-	return { text: "", hasImages: false };
-}
-
-/** Replace the text parts of the last user message with `text`, keeping non-text parts (images, files) in place. */
-function rewriteLastUserText(context: StreamArgs["context"], text: string): void {
-	for (let i = context.messages.length - 1; i >= 0; i--) {
-		const message = context.messages[i];
-		if (!message || message.role !== "user") continue;
-		const content = message.content;
-		if (Array.isArray(content)) {
-			const kept: unknown[] = [];
-			for (const part of content) {
-				if (typeof part === "object" && part !== null && "type" in part && part.type !== "text") {
-					kept.push(part);
-				}
-			}
-			content.length = 0;
-			content.push({ type: "text", text }, ...kept);
-		}
-		return;
-	}
-}
-
-
-/** Events that make a streaming model feel responsive to the user. */
-function isVisibleResponseEvent(event: { type: string; [k: string]: unknown }): boolean {
-	if (event.type === "thinking_delta" || event.type === "text_delta" || event.type === "toolcall_delta") {
-		return typeof event.delta === "string" && event.delta.length > 0;
-	}
-	return event.type === "image_end" || event.type === "toolcall_start" || event.type === "toolcall_end" || event.type === "done";
-}
-
-/** Build the delegate factory: each candidate → host streamSimple with its key. */
-function buildFactory(
+/**
+ * OMP's thin mapping onto the shared runtime. Credentials and the host stream
+ * remain adapter-private; routing, failover and accounting live in RouterRuntime.
+ */
+export function createStreamHandler(
 	state: AdapterState,
 	pi: OmpExtensionApi,
-	context: StreamArgs["context"],
-	options: StreamArgs["options"],
-	tierThinking: ThinkingLevel | undefined,
-	onTargetStart?: (target: { provider: string; model: string }) => void,
-	onTargetVisible?: (target: { provider: string; model: string }) => void,
-) {
-	const host = createHostPorts(pi, state.ctx!, state);
-	return async function* factory(target: RouteTarget) {
-		onTargetStart?.(target);
-		const resolved = state.ctx?.models.resolve(`${target.provider}/${target.model}`);
-		if (!resolved) {
-			throw new Error(`auto-router: target not resolvable: ${target.provider}/${target.model}`);
+	args: StreamArgs,
+): AsyncGenerator<{ type: string; [k: string]: unknown }> {
+	return (async function* () {
+		const ctx = await waitForSessionContext(state, args.options?.signal);
+		if (!ctx) {
+			yield* failWith("auto-router: session context not ready — no session_start received before the request; restart the omp session or reload the extension");
+			return;
 		}
-		const apiKey = await host.getApiKey(target);
-
-		// Target-level thinking wins over the tier default. Apply it inside the
-		// candidate generator so failover can steer each target independently,
-		// then restore the session's previous level when that candidate ends.
-		const configuredThinking = target.thinking ?? tierThinking;
-		const appliedThinking =
-			configuredThinking !== undefined
-				? clampThinking(configuredThinking, resolveThinkingCap(target))
-				: undefined;
-		if (configuredThinking !== undefined && appliedThinking !== configuredThinking) {
-			state.eventLog.append({
-				type: "warn",
-				at: Date.now(),
-				what: "thinking-clamped",
-				target: `${target.provider}/${target.model}`,
-				from: configuredThinking,
-				to: appliedThinking,
-			});
+		if (!state.modelsReady) {
+			const profileName = args.model.id.replace(/^auto-router\//, "");
+			const profile = state.registry.profile(profileName);
+			if (profile) await waitForConfiguredModel(ctx, Object.values(profile.tiers).flatMap((tier) => tier?.targets ?? []), args.options?.signal);
+			state.modelsReady = true;
 		}
-		const canSteerThinking =
-			appliedThinking !== undefined &&
-			!state.shadowEnabled &&
-			typeof pi.setThinkingLevel === "function";
-		const priorThinking =
-			canSteerThinking && typeof pi.getThinkingLevel === "function" ? pi.getThinkingLevel() : undefined;
-		if (canSteerThinking && appliedThinking !== undefined) {
-			try {
-				pi.setThinkingLevel(appliedThinking);
-			} catch (error) {
-				state.eventLog.append({
-					type: "error",
-					at: Date.now(),
-					what: "setThinkingLevel",
-					error: redactSecrets(formatError(error)),
-				});
-			}
-		}
-
 		try {
-			const stream = streamSimple(resolved as never, context as never, {
-				...(options ?? {}),
-				...(apiKey !== undefined ? { apiKey } : {}),
-			} as never);
-			let visible = false;
-			for await (const event of stream) {
-				if (!visible && isVisibleResponseEvent(event)) {
-					visible = true;
-					onTargetVisible?.(target);
+			const runtime = new RouterRuntime(state, createOmpRuntimeHost(state, pi, ctx));
+			for await (const event of runtime.stream({
+				profile: args.model.id.replace(/^auto-router\//, ""),
+				context: args.context,
+				options: args.options,
+				estimatedTokens: resolveEstimatedTokens(ctx, args.context),
+			})) yield event;
+			const decision = state.lastDecision?.decision;
+			if (decision) {
+				const profile = state.registry.profile(decision.profile);
+				const targets = profile ? Object.values(profile.tiers).flatMap((tier) => tier?.targets ?? []) : [];
+				const endpoint = resolveBalanceEndpoint(decision.target.provider, targets);
+				if (endpoint) {
+					const balance = await fetchProviderBalance(ctx, state, decision.target.provider, endpoint);
+					if (balance) state.balanceCache[decision.target.provider] = balance;
 				}
-				yield event as never;
+				renderWidget(state, createHostPorts(pi, ctx, state), decision);
 			}
+		} catch (error) {
+			if (!(error instanceof RouterRuntimeError)) throw error;
+			const message = error.message.replace("auto-router: no eligible candidates", "auto-router [constraint-solver]: no eligible candidates");
+			yield* failWith(message);
 		} finally {
-			if (canSteerThinking && priorThinking !== undefined) {
-				try {
-					pi.setThinkingLevel(priorThinking);
-				} catch {
-					// restore best-effort; the next candidate/request re-steers anyway
-				}
-			}
+			persistTrackers(state);
 		}
+	})();
+}
+
+function createOmpRuntimeHost(state: AdapterState, pi: OmpExtensionApi, ctx: OmpExtensionContext): RouterRuntimeHost {
+	const ports = createHostPorts(pi, ctx, state);
+	return {
+		candidatesFor: (targets, cooldowns) => enrichCandidates(ports, targets, cooldowns),
+		async *streamTarget(target, context, options, thinking) {
+			const model = ctx.models.resolve(`${target.provider}/${target.model}`);
+			if (!model) throw new Error(`auto-router: target not resolvable: ${target.provider}/${target.model}`);
+			const apiKey = await ports.getApiKey(target);
+			const priorThinking = thinking !== undefined && !state.shadowEnabled && typeof pi.getThinkingLevel === "function" ? pi.getThinkingLevel() : undefined;
+			if (thinking !== undefined && !state.shadowEnabled) pi.setThinkingLevel(thinking);
+			try {
+				for await (const event of streamSimple(model as never, context as never, { ...options, ...(apiKey ? { apiKey } : {}) } as never)) yield event as never;
+			} finally {
+				if (priorThinking !== undefined) pi.setThinkingLevel(priorThinking);
+			}
+		},
+		isRetryable: (error) => isProviderRetryableError(error) || defaultIsRetryable(error),
+		clampThinking: (target, level) => clampThinking(level, resolveThinkingCap(target)),
+		persistDecision: (_type, decision) => pi.appendEntry(ROUTER_DECISION_ENTRY, decision),
+		setStatus: (text) => ports.setStatus(text),
+		fetchQuota: (providers) => ports.fetchQuota(providers),
+		now: () => Date.now(),
 	};
 }
+
 async function waitForConfiguredModel(
 	ctx: OmpExtensionContext,
 	targets: Array<{ provider: string; model: string }>,
@@ -341,25 +258,6 @@ export async function waitForSessionContext(
 	return undefined;
 }
 
-/** Read optional tuning flags from the environment; all are documented in README.md. */
-function readEnvFlag(name: string): boolean {
-	return process.env[name] === "1" || process.env[name] === "true";
-}
-
-function readEnvNumber(name: string, fallback: number): number {
-	const raw = process.env[name];
-	if (raw === undefined) return fallback;
-	const parsed = Number(raw);
-	return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function createPipelineFlags(): { uviHardMode: boolean; confidenceThreshold: number } {
-	return {
-		uviHardMode: readEnvFlag("OMP_AUTO_ROUTER_UVI_HARD"),
-		confidenceThreshold: readEnvNumber("OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD", 0.45),
-	};
-}
-
 /** Extract a usable token estimate from the host, or undefined if not available. */
 function resolveEstimatedTokens(ctx: OmpExtensionContext, context: StreamArgs["context"]): number | undefined {
 	try {
@@ -395,342 +293,6 @@ function resolveEstimatedTokens(ctx: OmpExtensionContext, context: StreamArgs["c
 	}
 	const estimated = Math.ceil(chars / 4);
 	return estimated > 0 ? estimated : undefined;
-}
-
-export function createStreamHandler(
-	state: AdapterState,
-	pi: OmpExtensionApi,
-	args: StreamArgs,
-): AsyncGenerator<{ type: string; [k: string]: unknown }> {
-	return (async function* handler() {
-		const ctx = await waitForSessionContext(state, args.options?.signal);
-		if (!ctx) {
-			yield* failWith(
-				"auto-router: session context not ready — no session_start received before the request; restart the omp session or reload the extension",
-			);
-			return;
-		}
-		const profileName = args.model.id.replace(/^auto-router\//, "");
-		const { text: rawPrompt, hasImages } = lastUserText(args.context);
-		let priorTier = state.decisions.last()?.tier as "trivial" | "simple" | "standard" | "complex" | undefined;
-		// Test/build failure escalation: for a short window after a failing test
-		// command the tier floor rises one level — the next prompt is very likely
-		// a debugging task that warrants a stronger model.
-		if (
-			state.testFailureAt !== undefined &&
-			Date.now() - state.testFailureAt < TEST_FAILURE_ESCALATION_MS &&
-			priorTier !== "complex"
-		) {
-			const floor = priorTier ?? "simple";
-			priorTier = TIER_LADDER[Math.min(TIER_LADDER.indexOf(floor) + 1, TIER_LADDER.length - 1)];
-		}
-
-		const host =
-			state.hostPorts?.ctx === ctx
-				? state.hostPorts.host
-				: (state.hostPorts = { ctx, host: createHostPorts(pi, ctx, state) }).host;
-		const profile = state.registry.profile(profileName);
-		if (!profile) {
-			yield* failWith(`auto-router: unknown profile "${profileName}"`);
-			return;
-		}
-		const allTargets = Object.values(profile.tiers).flatMap((t) => t.targets);
-		const estimatedTokens = resolveEstimatedTokens(ctx, args.context);
-
-		// Quota snapshots feed UVI; throttled to once per 30s.
-		let quota: Record<string, QuotaSnapshot> = {};
-		if (state.uviEnabled && state.ctx) {
-			const providers = [...new Set(allTargets.map((t) => t.provider))];
-			const nowMs = Date.now();
-			if (nowMs - state.quotaCache.at >= quotaRefreshMs()) {
-				const snapshots = await host.fetchQuota(providers);
-				state.quotaCache = { at: nowMs, data: snapshots };
-			}
-			for (const snapshot of state.quotaCache.data) {
-				quota[snapshot.provider] = snapshot;
-			}
-		}
-		// Custom providers are discovered asynchronously during host startup.
-		// Give the live registry a bounded grace period once per session; after
-		// the first successful resolve we stop polling (modelsReady).
-		if (!state.modelsReady) {
-			await waitForConfiguredModel(ctx, allTargets, args.options?.signal);
-			state.modelsReady = true;
-		}
-		// Candidates = active profile's tier targets enriched from the live host registry.
-		// The pipeline resolves the tier internally; we feed it the full profile target set.
-		const candidates = enrichCandidates(host, allTargets, state.cooldowns);
-
-		const now = new Date();
-		const flags = createPipelineFlags();
-
-		// LLM adjudication: mixed-phase prompts ("设计并实现 X") are
-		// semantically ambiguous for keyword heuristics — ask the session's
-		// current LLM to pick the tier. Fail-open: errors/timeouts keep the
-		// heuristic decision. Runs before route() so the adjudicated tier
-		// flows through the normal precedence (shortcut > policy > adjudication).
-		let adjudicatedTier: ComplexityTier | undefined;
-		let adjudicatorModel: string | undefined;
-		if (adjudicationEnabled()) {
-			const preShortcut = parseShortcut(rawPrompt);
-			const pre = classifyComplexity({
-				prompt: preShortcut.cleanPrompt,
-				estimatedTokens:
-					estimatedTokens ?? Math.max(1, Math.ceil(preShortcut.cleanPrompt.length / 4)),
-				hasImages,
-				conversationDepth: state.decisions.list().length,
-				intent: classifyIntent(preShortcut.cleanPrompt),
-				shortcut: preShortcut,
-				...(priorTier !== undefined ? { priorTier } : {}),
-				overrides: state.classifierOverrides,
-			});
-			if (pre.signals.mixedPhase) {
-				const target = pickAdjudicatorTarget(state, profileName);
-				if (target) {
-					const adjudicated = await adjudicateTier(
-						state,
-						host,
-						target,
-						preShortcut.cleanPrompt,
-						args.options?.signal,
-					);
-					if (adjudicated) {
-						adjudicatedTier = adjudicated.tier;
-						adjudicatorModel = adjudicated.model;
-					}
-				}
-			}
-		}
-
-		const { decision, cleanPrompt } = route(
-			{
-				rawPrompt,
-				profile: profileName,
-				hasImages,
-				conversationDepth: state.decisions.list().length,
-				...(priorTier !== undefined ? { priorTier } : {}),
-				candidates,
-				quota,
-				...(estimatedTokens !== undefined ? { estimatedTokens } : {}),
-				...(adjudicatedTier !== undefined ? { adjudicatedTier } : {}),
-				now,
-			},
-			{
-				registry: state.registry,
-				circuit: state.circuit,
-				latency: state.latency,
-				budgets: state.budgets,
-				uviHardMode: flags.uviHardMode,
-				confidenceThreshold: flags.confidenceThreshold,
-				classifierOverrides: state.classifierOverrides,
-			},
-		);
-
-		if (adjudicatedTier !== undefined && adjudicatorModel !== undefined) {
-			decision.reasoning.push(`llm adjudication by ${adjudicatorModel} → ${adjudicatedTier}`);
-		}
-
-		// Shadow mode: keep the decision for explain/stats, but actually route
-		// in the selected tier's literal config order (no partition reordering).
-		const tierCfg = state.registry.tierConfig(profileName, decision.tier);
-		const tierThinking = tierCfg?.thinking;
-		let finalOrder = decision.orderedCandidates;
-		if (state.shadowEnabled) {
-			finalOrder =
-				tierCfg?.targets.filter((t) => host.isHealthy(t)) ?? [];
-			decision.orderedCandidates = finalOrder;
-			decision.target = finalOrder[0] ?? decision.target;
-		} else {
-			// Rating feedback loop: candidates the user keeps rating badly are
-			// demoted to the back of the chain (stable — relative order kept).
-			finalOrder = demotePoorlyRated(finalOrder, state.ratings);
-			decision.orderedCandidates = finalOrder;
-			decision.target = finalOrder[0] ?? decision.target;
-		}
-		const selectedThinking = decision.target.thinking ?? tierThinking;
-		if (selectedThinking !== undefined) decision.thinking = selectedThinking;
-		else delete decision.thinking;
-
-		// No eligible candidate: failoverStream would throw a bare programmer
-		// error, so fail with an actionable message instead. Exclusion reasons
-		// from the pipeline (unhealthy / cooldown / circuit / UVI / capability)
-		// explain what the user can fix.
-		if (finalOrder.length === 0) {
-			state.decisions.record(decision);
-			state.lastDecision = { at: now.getTime(), decision, cleanPrompt };
-			pi.appendEntry("com.omp.auto-router.decision", decision);
-			state.eventLog.append({ type: "decision", at: now.getTime(), profile: decision.profile, tier: decision.tier, target: decision.target });
-			const exclusions = decision.reasoning.filter((line) => line.startsWith("excluded "));
-			const detail = exclusions.length > 0 ? ` — ${exclusions.join("; ")}` : "";
-			yield* failWith(
-				`auto-router [constraint-solver]: no eligible candidates for profile "${profileName}" tier=${decision.tier}${detail}`,
-			);
-			return;
-		}
-
-		// Record + persist the decision for /auto-router explain.
-		state.decisions.record(decision);
-		state.lastDecision = { at: now.getTime(), decision, cleanPrompt };
-		pi.appendEntry("com.omp.auto-router.decision", decision);
-		state.eventLog.append({
-			type: "decision",
-			at: now.getTime(),
-			profile: decision.profile,
-			tier: decision.tier,
-			target: decision.target,
-			...(decision.thinking !== undefined ? { thinking: decision.thinking } : {}),
-		});
-		host.setStatus(
-			`auto-router ${decision.profile} | tier=${decision.tier} (${decision.confidence.toFixed(2)}) | ${decision.target.provider}/${decision.target.model}${decision.thinking !== undefined ? ` | thinking=${decision.thinking}` : ""}${observedLatencySuffix(state, decision)}`,
-		);
-		// Balance-capable providers (e.g. deepseek) surface their wallet via the
-		// balance API, not usage-report windows — fetch + cache it so the widget
-		// can show the current provider's remaining balance. Throttled on its own
-		// clock (balanceAt), never on the quota cache — the quota cache is
-		// refreshed earlier in this same request, so coupling to its staleness
-		// would make the balance fetch unreachable.
-		const balanceProvider = decision.target.provider;
-		const balanceEndpoint =
-			state.uviEnabled && Date.now() - state.balanceAt >= quotaRefreshMs()
-				? resolveBalanceEndpoint(balanceProvider, allTargets)
-				: undefined;
-		if (balanceEndpoint !== undefined) {
-			const balance = await fetchProviderBalance(ctx, state, balanceProvider, balanceEndpoint);
-			state.balanceAt = Date.now();
-			if (balance !== undefined) state.balanceCache[balanceProvider] = balance;
-		}
-		renderWidget(state, host, decision);
-
-		// Strip the router tokens before the model ever sees the prompt.
-		rewriteLastUserText(args.context, cleanPrompt);
-
-		// Failover across the ordered chain; thinking-only partials stay failover-eligible.
-		const targetStarts = new Map<string, number>();
-		const targetFirstOutputs = new Map<string, number>();
-		let settledTarget: { provider: string; model: string } | undefined;
-		const hooks = {
-			// Fail over on transient provider errors (omp classifier) OR on
-			// billing/quota/permission exhaustion (module wording classifier) —
-			// an exhausted provider must never hard-stop the failover chain.
-			isRetryable: (error: unknown) =>
-				isProviderRetryableError(error) || defaultIsRetryable(error),
-			isSubstantive: defaultIsSubstantive,
-			onTargetFailed: (target: { provider: string; model: string }, error: unknown) => {
-				const key = `${target.provider}/${target.model}`;
-				state.circuit.recordFailure(key, Date.now());
-				// Transient cooldown: the solver excludes the target for a few
-				// minutes so subsequent requests skip it instead of rediscovering
-				// the failure on every prompt. The reason is surfaced in the
-				// "no eligible candidates" error so the cause stays visible.
-				state.cooldowns.set(key, { until: Date.now() + cooldownAfterFailureMs(), reason: redactSecrets(formatError(error)) });
-				state.eventLog.append({
-					type: "error",
-					at: Date.now(),
-					provider: target.provider,
-					model: target.model,
-					error: redactSecrets(formatError(error)),
-				});
-			},
-			onFailover: (from: { provider: string; model: string }, to: { provider: string; model: string }, error: unknown) => {
-				state.eventLog.append({
-					type: "failover",
-					at: Date.now(),
-					from: `${from.provider}/${from.model}`,
-					to: `${to.provider}/${to.model}`,
-					error: redactSecrets(formatError(error)),
-				});
-			},
-			onTargetSettled: (target: RouteTarget) => {
-				settledTarget = target;
-				const key = `${target.provider}/${target.model}`;
-				state.circuit.recordSuccess(key);
-				state.cooldowns.delete(key);
-				const firstOutputMs = targetFirstOutputs.get(key);
-				if (firstOutputMs !== undefined) {
-					state.latency.record(key, firstOutputMs);
-				}
-				if (!state.shadowEnabled) {
-					const key = `${target.provider}/${target.model}`;
-					state.sessionUsage.calls.set(key, (state.sessionUsage.calls.get(key) ?? 0) + 1);
-					const settledThinking = target.thinking ?? tierThinking;
-					if (settledThinking !== undefined) {
-						let seen = state.sessionUsage.thinking.get(key);
-						if (!seen) {
-							seen = new Set<string>();
-							state.sessionUsage.thinking.set(key, seen);
-						}
-						seen.add(settledThinking);
-					}
-				}
-			},
-		};
-
-		const factory = buildFactory(
-			state,
-			pi,
-			args.context,
-			args.options,
-			tierThinking,
-			(target) => {
-				targetStarts.set(`${target.provider}/${target.model}`, Date.now());
-			},
-			(target) => {
-				const key = `${target.provider}/${target.model}`;
-				const targetStart = targetStarts.get(key);
-				if (targetStart !== undefined) {
-					targetFirstOutputs.set(key, Date.now() - targetStart);
-				}
-			},
-		);
-
-		try {
-			for await (const event of failoverStream(finalOrder, factory, hooks, { signal: args.options?.signal })) {
-				if (event.type === "done" && settledTarget && typeof event.message === "object" && event.message !== null) {
-					recordUsage(state, settledTarget, (event.message as { usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }).usage);
-				}
-				yield event;
-			}
-		} finally {
-			// Warm-start persistence: keep circuit/latency snapshots across restarts.
-			persistTrackers(state);
-		}
-	})();
-}
-
-/** Estimate USD from provider-reported token usage × the target model's pricing. */
-function recordUsage(
-	state: AdapterState,
-	target: { provider: string; model: string },
-	usage: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } | undefined,
-): void {
-	if (!usage) return;
-	const model = state.ctx?.models.resolve(`${target.provider}/${target.model}`);
-	const cost = model?.cost;
-	const inputTokens = usage.input ?? 0;
-	const outputTokens = usage.output ?? 0;
-	const cacheRead = usage.cacheRead ?? 0;
-	const cacheWrite = usage.cacheWrite ?? 0;
-	const estimatedCost = cost
-		? (inputTokens * cost.input + outputTokens * cost.output + cacheRead * cost.cacheRead + cacheWrite * cost.cacheWrite) / 1_000_000
-		: 0;
-	state.budgets.record(
-		target.provider,
-		{ inputTokens, outputTokens, cost: estimatedCost },
-		new Date(),
-	);
-	if (!state.shadowEnabled) {
-		const key = `${target.provider}/${target.model}`;
-		state.sessionUsage.cost.set(key, (state.sessionUsage.cost.get(key) ?? 0) + estimatedCost);
-	}
-	state.eventLog.append({
-		type: "settled",
-		at: Date.now(),
-		provider: target.provider,
-		model: target.model,
-		inputTokens,
-		outputTokens,
-		estimatedCost,
-	});
 }
 
 async function* failWith(message: string): AsyncGenerator<{ type: string; [k: string]: unknown }> {

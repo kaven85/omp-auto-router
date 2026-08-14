@@ -137,7 +137,7 @@ export class RouterRuntime {
 		const tier = this.state.registry.tierConfig(decision.profile, decision.tier);
 		const tierThinking = tier?.thinking;
 		const order = this.state.shadowEnabled
-			? tier?.targets.filter((target) => candidates.some((candidate) => candidate.target === target && candidate.healthy)) ?? []
+			? tier?.targets.filter((target) => candidates.some((candidate) => candidate.key === targetKey(target) && candidate.healthy)) ?? []
 			: demotePoorlyRated(decision.orderedCandidates, this.state.ratings);
 		decision.orderedCandidates = order;
 		if (order[0]) decision.target = order[0];
@@ -145,12 +145,17 @@ export class RouterRuntime {
 		const selectedThinking = configuredThinking && this.host.clampThinking
 			? this.host.clampThinking(decision.target, configuredThinking)
 			: configuredThinking;
+		if (configuredThinking && selectedThinking !== configuredThinking) {
+			this.state.eventLog.append({ type: "warn", at: this.now(), what: "thinking-clamped", target: targetKey(decision.target), from: configuredThinking, to: selectedThinking });
+		}
 		if (selectedThinking) decision.thinking = selectedThinking;
 		else delete decision.thinking;
 
 		this.recordDecision(decision, cleanPrompt);
 		if (order.length === 0) {
-			throw new RouterRuntimeError(`no eligible candidates for profile "${decision.profile}" tier=${decision.tier}`);
+			const exclusions = decision.reasoning.filter((line) => line.startsWith("excluded "));
+			const detail = exclusions.length ? ` — ${exclusions.join("; ")}` : "";
+			throw new RouterRuntimeError(`no eligible candidates for profile "${decision.profile}" tier=${decision.tier}${detail}`);
 		}
 		this.host.setStatus?.(
 			`auto-router ${decision.profile} | tier=${decision.tier} (${decision.confidence.toFixed(2)}) | ${decision.target.provider}/${decision.target.model}`,

@@ -121,7 +121,7 @@ describe("adapter router (Mode A)", () => {
 		expect(streamCalls).toEqual([{ provider: "anthropic", model: "opus" }]);
 		// Decision recorded + persisted.
 		expect(state.lastDecision?.decision.tier).toBe("complex");
-		expect(api.entries.some((e) => e.customType === "com.omp.auto-router.decision")).toBe(true);
+		expect(api.entries.some((e) => e.customType === "com.auto-router.v1.decision")).toBe(true);
 		rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -954,7 +954,7 @@ describe("adapter router (Mode A)", () => {
 		// Nothing delegated downstream; decision still recorded for explain.
 		expect(streamCalls).toEqual([]);
 		expect(state.lastDecision?.decision.orderedCandidates).toEqual([]);
-		expect(api.entries.some((e) => e.customType === "com.omp.auto-router.decision")).toBe(true);
+		expect(api.entries.some((e) => e.customType === "com.auto-router.v1.decision")).toBe(true);
 		rmSync(dir, { recursive: true, force: true });
 	});
 
