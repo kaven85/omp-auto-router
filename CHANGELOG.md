@@ -1,6 +1,32 @@
 # Changelog
 
 
+## [Unreleased]
+
+### Added
+
+- Pi host adapter (`src/pi-adapter`): the package now declares a second host entry (`pi.extensions`) and runs on Pi via **public-interface Mode A delegation** — real providers are reached only through Pi's public ModelRegistry/Provider surface (`find` / `getProvider` / `getApiKeyAndHeaders`); no host source is modified, patched, or vendored. Profiles appear in the Pi model selector as `auto-router/<profile>`, `/auto-router use <profile>` switches via the model registry, and the full `/auto-router` command set is at parity with omp.
+- Pi lifecycle wiring: project-layer config (`<repo>/.pi/auto-router.yml`) loads only for trusted projects (untrusted projects are ignored and `doctor` says so), `/auto-router reload` re-reads both layers, persisted decisions survive session resume/branch (tree restore), trackers persist on `session_shutdown`, and `activate:` path activation (longest-prefix match) works on `session_start`.
+- Shared RouterRuntime (`src/runtime`): orchestration, failover, budgets, commands, widget, and config now live in one host-neutral implementation consumed by both adapters. Command behavior, the env-var dictionary, and the provider dictionary are unified across hosts.
+- Neutral, versioned custom session entry types: new writes use `com.auto-router.v1.decision` / `com.auto-router.v1.state`; legacy omp `com.omp.auto-router.*` entries are still read back.
+- Neutral env-var chain with precedence `AUTO_ROUTER_*` > `OMP_AUTO_ROUTER_*` (legacy alias) > `PI_AUTO_ROUTER_*`, covering `COOLDOWN_MS`, `QUOTA_REFRESH_MS`, `UVI_HARD`, `CONFIDENCE_THRESHOLD`, and `LLM_ADJUDICATE`.
+- `scripts/routing-stats.ts --host omp|pi`: the analytics script can now aggregate the Pi state directory (`$PI_CODING_AGENT_DIR/auto-router`, else `~/.pi/agent/auto-router`); an explicit path argument still wins.
+- Pi UVI explicit degradation: Pi's public interface has no usage-report quota API, so `/auto-router uvi`, `usage`, and `doctor` report UVI as explicitly unavailable instead of pretending quota is unused; the adapter never fabricates quota. Local budgets, session usage, provider balance endpoints (authenticated via `getApiKeyAndHeaders`), ratings, and cooldown/circuit/failover remain fully functional on Pi.
+
+### Changed
+
+- Dashboard widget duplicate-render suppression is now scoped per session instance instead of globally, so concurrent sessions no longer suppress each other's refreshes.
+- Verification is one command: `bun run verify` runs the full test suite plus three isolated type checks (`tsconfig.runtime.json` / `tsconfig.adapter.json` / `tsconfig.pi-adapter.json`).
+
+### Fixed
+
+- LLM adjudication of mixed-phase prompts and the `UVI_HARD` / `CONFIDENCE_THRESHOLD` env wiring are honored again by the shared runtime — both had gone inert after the runtime migration.
+
+### Compatibility
+
+- Tested against the Pi 0.84.1 dev fixture through its public extension interface only; compatibility is defined by the public capability contract (ModelRegistry `find`/`getProvider`/`getApiKeyAndHeaders`/`complete`, trusted-project config, custom session entries, widget/notify with headless no-op degradation), not by a pinned host build. omp support is unchanged from 0.5.0. Required vs optional host capabilities are probed at runtime and reported by `/auto-router doctor`. Authenticated end-to-end smoke on both hosts is still pending manual execution — no real-provider results are claimed here.
+
+
 ## [0.5.0] - 2026-08-12
 
 ### Added

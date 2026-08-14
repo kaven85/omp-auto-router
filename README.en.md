@@ -2,9 +2,9 @@
 
 [简体中文](README.md) | English
 
-A profile-based, complexity-aware auto-routing plugin for [omp (Oh My Pi)](https://github.com/can1357/oh-my-pi): a set of model-selection strategies (profiles) that picks different models per task complexity, with same-request failover, budget/quota awareness, and explainable decisions.
+A profile-based, complexity-aware auto-routing extension for [omp (Oh My Pi)](https://github.com/can1357/oh-my-pi) and [Pi](https://github.com/earendil-works/pi): one package, two host entries, one shared routing core. It exposes a set of model-selection strategies (profiles) that picks different models per task complexity, with same-request failover, budget/quota awareness, and explainable decisions.
 
-Ported from the design ideas of [pi-auto-router](https://github.com/danialranjha/pi-auto-router), with omp-native adaptation and a decoupled refactor.
+Ported from the design ideas of [pi-auto-router](https://github.com/danialranjha/pi-auto-router), with omp-native adaptation and a decoupled refactor into three layers: `src/core` (pure routing engine) → `src/runtime` (shared RouterRuntime: orchestration, failover, budgets, commands, widget, config) → `src/omp-adapter` / `src/pi-adapter` (thin host mappings). Command behavior is a single shared implementation registered by each adapter.
 
 ## Capabilities
 
@@ -20,18 +20,18 @@ Ported from the design ideas of [pi-auto-router](https://github.com/danialranjha
 - **Shadow mode**: record decisions but route by configured order, for comparison and validation
 - **Explainable**: `/auto-router explain` prints the full reasoning chain plus per-candidate ratings; decisions/usage are persisted as JSONL
 - **Restart memory**: circuit-breaker state and rolling first-visible-output latency persist (`circuit.json` / `first-output-latency.json`) for warm starts
-- **Env switches**: `OMP_AUTO_ROUTER_UVI_HARD=1` (exclude stressed-UVI providers), `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>` (classifier confidence gate, default 0.45), `OMP_AUTO_ROUTER_COOLDOWN_MS=<ms>` (post-failure target cooldown, default 60000, floor 5000), `OMP_AUTO_ROUTER_LLM_ADJUDICATE=0` (disable LLM adjudication of mixed-phase prompts, default on)
+- **Env switches** (neutral names; legacy `OMP_AUTO_ROUTER_*` / `PI_AUTO_ROUTER_*` spellings still work as aliases): `AUTO_ROUTER_UVI_HARD=1` (exclude stressed-UVI providers), `AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>` (classifier confidence gate, default 0.45), `AUTO_ROUTER_COOLDOWN_MS=<ms>` (post-failure target cooldown, default 60000, floor 5000), `AUTO_ROUTER_QUOTA_REFRESH_MS=<ms>` (quota refresh cadence, default 30000, floor 10000), `AUTO_ROUTER_LLM_ADJUDICATE=0|false` (disable LLM adjudication of mixed-phase prompts, default on)
 - **Background quota refresh**: UVI quota snapshots refresh every 30s in the background (host-managed timer), so requests never block on an expired cache
 - **Dashboard widget**: after each decision a profile/target/first-visible-output latency/budget/circuit/UVI overview is rendered via `setWidget` (degrades silently when the host lacks it)
 - **Provider registry**: provider-specific knowledge (Kimi window labels, DeepSeek balance endpoint, per-model thinking ranges) lives in `provider-registry.ts`; target-level `balanceEndpoint` / `thinkingCap` override the defaults
 - **Log rotation**: the event log truncates to its newest half past ~2 MB; daily budget buckets are kept for 62 days (monthly rollups indefinitely)
-- **Analytics script**: `bun scripts/routing-stats.ts` aggregates the event log (decisions per profile/tier/target, failovers, top errors)
+- **Analytics script**: `bun scripts/routing-stats.ts [--host omp|pi] [path]` aggregates the event log (decisions per profile/tier/target, failovers, top errors); `--host pi` reads the Pi state directory
 
 ---
 
 ## Installation
 
-The plugin is a directory containing a `package.json` (with an `omp.extensions` manifest). Two ways to load it:
+The plugin is a directory containing a `package.json` (declaring both an `omp.extensions` and a `pi.extensions` entry). Two ways to load it into omp:
 
 **Option A: permanent (recommended)** — `~/.omp/agent/config.yml`:
 
@@ -48,11 +48,23 @@ omp --extension /path/to/omp-auto-router
 
 > Note: point at the **package directory** (containing `package.json`), not a single file. Auto-discovery under `~/.omp/agent/extensions/` only scans one level of `*.ts`; multi-module plugins must be referenced explicitly via `config.yml`.
 
+### Installing into Pi
+
+The same package directory doubles as a Pi package — no modifying, patching, or copying of Pi/OMP installation files is involved:
+
+```bash
+pi install /path/to/omp-auto-router
+# or a one-off load:
+pi -e /path/to/omp-auto-router
+```
+
+See [Pi support and capability degradation](#pi-support-and-capability-degradation) for Pi config locations, the trust model, and degraded capabilities.
+
 ---
 
-## Onboarding (zero to working)
+## Onboarding on omp (zero to working)
 
-Follow these steps in order; each has a verifiable outcome. Once complete, the plugin takes over routing.
+Follow these steps in order; each has a verifiable outcome. Once complete, the plugin takes over routing. (For Pi, installation and config locations are covered in [Installing into Pi](#installing-into-pi) and [Pi support](#pi-support-and-capability-degradation); the commands and config schema are identical.)
 
 ### Step 0: prerequisites
 
@@ -133,6 +145,11 @@ Restart the session. All requests now go through `auto-router/test`.
 | decisions are all budget blocks/chain switches | budget exceeded or UVI critical | `/auto-router budget show`, `/auto-router uvi show`; retry after `clear` |
 | subagents bypass routing | `modelRoles.task` not configured | add `task: auto-router/<profile>`; confirm the subagent model change (`model_change` entry in the session file) |
 | config unchanged after `/auto-router reload` | you edited the project layer but cwd doesn't match | confirm `<cwd>/.omp/auto-router.yml` exists and cwd matches |
+| Pi: profile routes but every candidate is skipped as unauthenticated | target provider has no credentials in Pi's auth storage | run `/login` (or the provider's auth flow) for the target provider, then retry |
+| Pi: target is available in `/model` but never routed to | scoped models (`enabledModels`/`--models`) exclude it | include both the virtual `auto-router/*` profiles AND the real targets in the scope |
+| Pi: project config ignored | project not trusted | trust the project in Pi; `/auto-router doctor` reports the untrusted state |
+| every candidate reports cooldown/circuit open | recent failures cooled down the whole chain | cooldowns expire on their own (default 60s, `AUTO_ROUTER_COOLDOWN_MS`); check `/auto-router status` and the event-log `error` entries for the underlying provider failures |
+| Pi: provider streams an error event immediately | target API error (quota/billing/overload) surfaces as an assistant error event | read the event-log `error` entries; routing fails over only before substantive output |
 
 ### Final onboarding checklist
 
@@ -149,12 +166,12 @@ Restart the session. All requests now go through `auto-router/test`.
 
 Config has two layers, merged by the plugin (builtin defaults < user < project):
 
-| Layer | Path | Scope |
-|---|---|---|
-| user | `~/.omp/agent/auto-router.yml` | global |
-| project | `<repo>/.omp/auto-router.yml` | overrides within that project (same-name profiles are replaced wholesale) |
+| Layer | omp path | Pi path | Scope |
+|---|---|---|---|
+| user | `~/.omp/agent/auto-router.yml` | `<agentDir>/auto-router.yml` (`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`) | global |
+| project | `<repo>/.omp/auto-router.yml` | `<repo>/.pi/auto-router.yml` (loaded only when the project is trusted) | overrides within that project (same-name profiles are replaced wholesale) |
 
-Quick start: copy `auto-router.example.yml` from the repo root to `~/.omp/agent/auto-router.yml`, and replace `targets` with models that actually exist in your `/model` list.
+Quick start: copy `auto-router.example.yml` from the repo root to your user-layer path, and replace `targets` with models that actually exist in your model selector.
 
 ### Full example
 
@@ -234,7 +251,7 @@ activate:                           # auto-activate by cwd prefix
 | `model` | string | ✅ | must match the id shown by `/model` |
 | `label` | string | no | display label |
 | `billing` | `subscription/per-token` | no | default `subscription`; affects budget bucket and synthetic UVI |
-| `balanceEndpoint` | string | no | custom balance API (per-token providers) |
+| `balanceEndpoint` | string | no | custom balance API (per-token providers); **user layer only** — project-layer overrides are stripped for security |
 | `thinking` | `off/minimal/low/medium/high/xhigh/max` | no | overrides the owning tier's `thinking`; applied when failover reaches this target |
 | `thinkingCap` | `{min?, max?}` | no | thinking range (inclusive) the model accepts; overrides the provider-registry default. A tier/target thinking outside the range is clamped into range before steering, recorded as a `warn` event. E.g. `deepseek-v4-pro` defaults to `{min: high}` (accepts high/max only, rejects low/medium) |
 
@@ -296,9 +313,25 @@ With no config file, or when all layers fail to parse, the plugin falls back to 
 - **profiles**: same-name profiles are **replaced wholesale**; distinct names are kept
 - **active / aliases / activate**: a later layer's value wins when present; otherwise the earlier value is kept
 
+## Pi support and capability degradation
+
+On Pi the same routing core and command set run through the Pi adapter (`src/pi-adapter`), which delegates to real providers only via Pi's **public** ModelRegistry/Provider interfaces (Mode A). Behavior differences to be aware of:
+
+- **Profile models**: every profile appears in the model selector as `auto-router/<profile>`; `/auto-router use <profile>` switches through the model registry. All `/auto-router` subcommands behave the same as on omp.
+- **Config locations**: user layer `<agentDir>/auto-router.yml` (agentDir = `$PI_CODING_AGENT_DIR`, else `~/.pi/agent`); project layer `<repo>/.pi/auto-router.yml` is read **only when the project is trusted** — untrusted projects are ignored, and `/auto-router doctor` says so.
+- **Scoped models** (`enabledModels` / `--models`): a non-empty scope is a real allowlist. It must include **both** the virtual `auto-router/*` profile models **and** every real target, or routing cannot reach the targets.
+- **UVI unavailable**: Pi's public interface exposes no usage-report quota API, so UVI pacing is explicitly unavailable — `/auto-router uvi`, `usage`, and `doctor` say so, and the adapter never fabricates quota. Local budgets, session usage, provider balance endpoints, ratings, and cooldown/circuit/failover all still work.
+- **Balance endpoints**: authenticated via Pi's public auth resolution (`getApiKeyAndHeaders`); only the user config layer may set `balanceEndpoint`.
+- **State directory**: `<agentDir>/auto-router/` — separate from omp's `~/.omp/agent/auto-router`; there is no cross-host state migration.
+- **Session entries**: new writes use the neutral, versioned types `com.auto-router.v1.decision` / `com.auto-router.v1.state`; legacy omp `com.omp.auto-router.*` entries are still read back.
+- **Path activation** (`activate:` in config): longest-prefix match; works on Pi `session_start`.
+- **Print/JSON modes**: UI calls (widget, prompts, notifications) degrade to no-ops; routing itself is unaffected.
+
 
 
 ## Enabling routing
+
+*(omp host; on Pi, select `auto-router/<profile>` in the model selector or `/auto-router use <profile>` — see [Pi support](#pi-support-and-capability-degradation).)*
 
 ```text
 /model or /switch auto-router/<profile>
@@ -328,7 +361,7 @@ Once selected, **no manual intervention is needed**: every request is auto-class
 
 > **Split analysis**: the prompt is split into a phase sequence by phase conjunctions (`并/然后/接着/随后/再`, `and/then`) and sentence boundaries, and **the first phase sets the tier** — later phases are classified when their own turn arrives, so the tier flows with the phases. "帮我设计并实现一个登录功能" starts with design → complex (the build turn lands standard later: complex→standard); "实现支付逻辑，然后设计对账方案" starts with the build → standard (the design turn escalates: standard→complex); "按设计方案实现支付逻辑" is a single phase building on an existing plan → standard. Hard scope words (`重构/迁移/架构/跨文件`, `refactor/migrate/rewrite`) only count inside the first phase.
 >
-> Mixed-phase prompts (both planning and implementation phrasing inside the first phase, e.g. "implement the payment logic per the design doc") are semantically hard for keywords: by default the router asks **the current LLM** (the last decision's target; on a fresh session, the standard tier's first target) for a one-word adjudication (trivial/simple/standard/complex). Precedence: shortcut pin > policy force-tier > LLM adjudication > heuristic classifier. Adjudication failures/timeouts/unparseable replies fall back to the heuristic result and never touch routing health state. Disable with `OMP_AUTO_ROUTER_LLM_ADJUDICATE=0`.
+> Mixed-phase prompts (both planning and implementation phrasing inside the first phase, e.g. "implement the payment logic per the design doc") are semantically hard for keywords: by default the router asks **the current LLM** (the last decision's target; on a fresh session, the standard tier's first target) for a one-word adjudication (trivial/simple/standard/complex). Precedence: shortcut pin > policy force-tier > LLM adjudication > heuristic classifier. Adjudication failures/timeouts/unparseable replies fall back to the heuristic result and never touch routing health state. Disable with `AUTO_ROUTER_LLM_ADJUDICATE=0` (legacy `OMP_AUTO_ROUTER_LLM_ADJUDICATE` still works).
 
 Explicit pinning (highest priority, tokens stripped):
 
@@ -453,14 +486,14 @@ In-request pinning: `@fast` / `@swe` / `@reasoning` / `@long` / `@vision` / `@pr
 
 ## Security & credentials
 
-- **No separate credential store**: API keys are fetched at runtime via the omp host's `modelRegistry.getApiKey`; no keys in config, nothing persisted by the plugin.
+- **No separate credential store**: API keys are fetched at runtime through the host's public auth resolution (omp `modelRegistry.getApiKey`; Pi `getApiKeyAndHeaders`); no keys in config, nothing persisted by the plugin.
 - **Transport**: balance/quota probes use `https` + `Authorization: Bearer`; keys never go into URLs or logs.
 - **Disk whitelist**: host events (`auto_retry_*` / `credential_disabled` etc.) keep only whitelisted scalar fields (`provider` / `model` / `attempt` / `reason`); nested objects and request content are dropped.
 - **Write-time redaction**: every string written to `auto-router.events.jsonl` / `budget-*.json` / `ratings.json` (including error strings) passes through `redactSecrets` — Bearer tokens, `sk-` / `ghp_` / `AKIA` / JWT / PEM key blocks / URL-embedded credentials are all replaced with `[REDACTED]`.
 - **Path guard**: `state-store` rejects names containing path separators or dot-escapes (`assertBareName`); config paths are fixed constant joins.
 - **Bounded persistence**: `ratings.json` keeps the latest 1000 ratings by default (`FeedbackTracker.maxEntries`), avoiding unbounded growth.
 
-Secret redaction and whitelist rules live in `src/omp-adapter/redact.ts` (the path guard is in `src/core/state-store.ts`). These are defense-in-depth on top of "first discipline: don't leak", not a replacement for it.
+Secret redaction and whitelist rules live in `src/core/redact.ts` (the path guard is in `src/core/state-store.ts`). These are defense-in-depth on top of "first discipline: don't leak", not a replacement for it.
 
 ## Verification & debugging
 
@@ -472,32 +505,49 @@ Secret redaction and whitelist rules live in `src/omp-adapter/redact.ts` (the pa
 Event log (one `decision` line + one `settled` line per request, with real token usage and estimated cost):
 
 ```bash
-tail ~/.omp/agent/auto-router/auto-router.events.jsonl
+tail ~/.omp/agent/auto-router/auto-router.events.jsonl        # omp
+tail "${PI_CODING_AGENT_DIR:-~/.pi/agent}/auto-router/auto-router.events.jsonl"   # Pi
 ```
 
-Budget/rating persistence: `~/.omp/agent/auto-router/budget-usage.json`, `budget-limits.json`, `ratings.json`.
+Budget/rating persistence: `budget-usage.json`, `budget-limits.json`, `ratings.json` in the same host state directory.
+
+Repo-level verification (from the package directory):
+
+```bash
+bun run verify                        # full test suite + three isolated type checks (runtime / omp adapter / pi adapter)
+./node_modules/.bin/pi --list-models -e .   # Pi model-discovery probe: lists the auto-router/<profile> models
+```
 
 ## Limitations
 
 - Virtual model metadata (contextWindow etc.) is static; only affects `/model` display
 - Under multi-session (RPC), ctx is a process-level singleton; the plugin assumes a "single active session"
-- `OMP_AUTO_ROUTER_UVI_HARD` / `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD` / `OMP_AUTO_ROUTER_QUOTA_REFRESH_MS` / `OMP_AUTO_ROUTER_COOLDOWN_MS` are supported; other `OMP_AUTO_ROUTER_*` switches are not implemented yet
+- Env switches resolve in the order `AUTO_ROUTER_*` > `OMP_AUTO_ROUTER_*` (legacy) > `PI_AUTO_ROUTER_*`; supported suffixes: `UVI_HARD`, `CONFIDENCE_THRESHOLD`, `QUOTA_REFRESH_MS`, `COOLDOWN_MS`, `LLM_ADJUDICATE`. Other suffixes are not implemented
+- On Pi, UVI quota pacing is unavailable (no public usage-report API) — see [Pi support and capability degradation](#pi-support-and-capability-degradation)
 - The plugin is not yet distributed via the omp marketplace / `omp install` (currently referenced as a directory)
+
+## Compatibility & maintenance
+
+The extension **never modifies, patches, or vendors host source** (omp or Pi). Compatibility is maintained exclusively through public host interfaces plus runtime capability probes (`/auto-router doctor`); when a capability is absent the dependent feature degrades explicitly rather than monkey-patching around it.
 
 ## Development
 
 ```bash
 bun install
-bun test tests/          # full core + adapter suite (344 cases)
-bun run check            # core tsc
-bun run check:adapter    # adapter tsc (host types are structural subsets + ambient shims)
+bun test tests/          # full suite (core + runtime + both adapters)
+bun run verify           # tests + three isolated type checks below
+bun run check:runtime    # runtime tsc
+bun run check:adapter    # omp adapter tsc (host types are structural subsets + ambient shims)
+bun run check:pi         # Pi adapter tsc (against @earendil-works/pi-* public types)
 ```
 
 Directory layout:
 
 ```
-src/core/          routing engine (host-agnostic, zero omp imports; directly testable with bun:test)
-src/omp-adapter/   omp adapter layer (the only place that touches ExtensionAPI)
-src/omp-adapter/redact.ts   secret redaction + event disk-write whitelist
+src/core/          routing engine (host-agnostic, zero host imports; directly testable with bun:test)
+src/core/redact.ts       secret redaction + event disk-write whitelist
+src/runtime/       shared RouterRuntime: orchestration, failover, budgets, commands, widget, config
+src/omp-adapter/   omp adapter layer (ExtensionAPI mapping)
+src/pi-adapter/    Pi adapter layer (public ModelRegistry/Provider delegation)
 auto-router.example.yml
 ```

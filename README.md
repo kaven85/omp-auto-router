@@ -2,9 +2,9 @@
 
 简体中文 | [English](README.en.md)
 
-面向 [omp (Oh My Pi)](https://github.com/can1357/oh-my-pi) 的 profile 化、复杂度感知自动路由插件：一套模型选择策略（profile），按任务复杂度自动挑选不同模型，带同请求 failover、预算/配额感知、可解释决策。
+面向 [omp (Oh My Pi)](https://github.com/can1357/oh-my-pi) 与 [Pi](https://github.com/earendil-works/pi) 的 profile 化、复杂度感知自动路由扩展：一个包、两个宿主入口、一套共享路由核心。对外提供一组模型选择策略（profile），按任务复杂度自动挑选不同模型，带同请求 failover、预算/配额感知、可解释决策。
 
-基于 [pi-auto-router](https://github.com/danialranjha/pi-auto-router) 的设计思想移植，但做了 omp 原生适配与解耦重构。
+基于 [pi-auto-router](https://github.com/danialranjha/pi-auto-router) 的设计思想移植，但做了 omp 原生适配与解耦重构，分三层：`src/core`（纯路由引擎）→ `src/runtime`（共享 RouterRuntime：编排、failover、预算、命令、widget、配置）→ `src/omp-adapter` / `src/pi-adapter`（薄宿主映射）。命令行为是两个适配器共同注册的单一共享实现。
 
 ## 能力一览
 
@@ -20,18 +20,18 @@
 - **影子模式**：照记决策但按配置顺序路由，对比验证
 - **可解释**：`/auto-router explain` 输出完整推理链与链上候选评分；决策/用量 JSONL 落盘
 - **跨重启记忆**：熔断器状态与首个可见输出延迟滚动均值持久化（`circuit.json` / `first-output-latency.json`），重启后 warm-start
-- **环境开关**：`OMP_AUTO_ROUTER_UVI_HARD=1`（stressed UVI 直接排除）、`OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>`（分类置信度阈值，默认 0.45）、`OMP_AUTO_ROUTER_QUOTA_REFRESH_MS=<ms>`（配额刷新节奏，默认 30000，下限 10000）、`OMP_AUTO_ROUTER_COOLDOWN_MS=<ms>`（失败后目标冷却时长，默认 60000，下限 5000）、`OMP_AUTO_ROUTER_LLM_ADJUDICATE=0`（关闭混合阶段提示词的 LLM 仲裁，默认开启）
+- **环境开关**（中性命名；旧 `OMP_AUTO_ROUTER_*` / `PI_AUTO_ROUTER_*` 写法仍作为别名生效）：`AUTO_ROUTER_UVI_HARD=1`（stressed UVI 直接排除）、`AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>`（分类置信度阈值，默认 0.45）、`AUTO_ROUTER_QUOTA_REFRESH_MS=<ms>`（配额刷新节奏，默认 30000，下限 10000）、`AUTO_ROUTER_COOLDOWN_MS=<ms>`（失败后目标冷却时长，默认 60000，下限 5000）、`AUTO_ROUTER_LLM_ADJUDICATE=0|false`（关闭混合阶段提示词的 LLM 仲裁，默认开启）
 - **后台配额刷新**：session 启动后每 30s 后台刷新 UVI 配额（host managed timer），请求路径不再因缓存过期而阻塞
 - **仪表盘 widget**：决策后渲染 profile/目标/首个可见输出延迟/预算/熔断/UVI 概览；后台刷新落地后立即重渲染，已过 resetsAt 的配额窗口按已重置显示，内容无变化时不重复渲染（host 无 setWidget 时自动降级）
 - **Provider registry**：provider 专属知识（Kimi 窗口标签、DeepSeek 余额端点、模型 thinking 强度范围）集中在 `provider-registry.ts`；target 级 `balanceEndpoint` / `thinkingCap` 可覆盖默认
 - **日志轮转**：事件日志超过 ~2MB 自动截断保留最新一半；预算 daily 桶保留 62 天（monthly 无限期）
-- **分析脚本**：`bun scripts/routing-stats.ts` 聚合事件日志（profile/tier/target 分布、failover、top 错误）
+- **分析脚本**：`bun scripts/routing-stats.ts [--host omp|pi] [path]` 聚合事件日志（profile/tier/target 分布、failover、top 错误）；`--host pi` 读取 Pi 状态目录
 
 ---
 
 ## 安装
 
-插件是含 `package.json`（`omp.extensions` 清单）的目录。两种加载方式：
+插件是含 `package.json`（同时声明 `omp.extensions` 与 `pi.extensions` 入口）的目录。omp 下两种加载方式：
 
 **方式 A：常驻（推荐）** — `~/.omp/agent/config.yml`：
 
@@ -48,27 +48,23 @@ omp --extension /path/to/omp-auto-router
 
 > 注意：指向的是**包目录**（含 `package.json`），不是单个文件；`~/.omp/agent/extensions/` 的自动发现只扫一层 `*.ts`，多模块插件请用 `config.yml` 显式引用。
 
----
+### 安装到 Pi
 
-## Pi 安装（Mode A）
-
-同一包同时声明 Pi extension；无需修改、patch 或复制 Pi/OMP 安装文件：
+同一包目录即 Pi package，无需修改、patch 或复制 Pi/OMP 安装文件：
 
 ```bash
 pi install /path/to/omp-auto-router
-# 或一次性验证
+# 或一次性加载：
 pi -e /path/to/omp-auto-router
 ```
 
-Pi 用户配置为 Pi agent directory 下的 `auto-router.yml`（通常为 `~/.pi/agent/auto-router.yml`，由 Pi 的公开 agent-directory helper 解析）；可信项目可在 `.pi/auto-router.yml` 覆盖。选择 `auto-router/<profile>` 后，请求会经 Pi 的有效模型注册表委托到配置的真实 target。若启用了 `--models` / `enabledModels`，它必须同时允许虚拟 profile 和全部真实 targets。
-
-Pi 通过公开 ModelRegistry/Provider 接口解析认证、headers、动态 base URL 和 provider environment；虚拟 Provider 的占位凭据不会上游发送。Pi 未公开 OMP 等价的 usage-report 接口，因此 UVI 显示为 unavailable；本地 budget、实际 usage/cost、冷却、熔断、延迟和 failover 不受影响。运行 `/auto-router doctor` 可查看该降级与缺失 target/scope/auth 的诊断。
+Pi 的配置位置、信任模型与降级能力见 [Pi 支持与能力降级](#pi-支持与能力降级)。
 
 ---
 
-## 接入指引（从零到跑通）
+## omp 接入指引（从零到跑通）
 
-按顺序执行，每步都有可验证的结果；全部完成后插件即接管路由。
+按顺序执行，每步都有可验证的结果；全部完成后插件即接管路由。（Pi 的安装与配置位置见 [安装到 Pi](#安装到-pi) 与 [Pi 支持](#pi-支持与能力降级)；命令与配置 schema 完全一致。）
 
 ### 第 0 步：确认前置条件
 
@@ -150,6 +146,11 @@ modelRoles:
 | 决策全是预算阻断/换链 | budget 超限或 UVI critical | `/auto-router budget show`、`/auto-router uvi show`；`clear` 后重试 |
 | 子代理没走路由 | `modelRoles.task` 未配置 | 加 `task: auto-router/<profile>`；确认子代理模型变更（会话文件 `model_change` 条目） |
 | `/auto-router reload` 后配置没变 | 改的是项目层但 cwd 不对 | 确认 `<cwd>/.omp/auto-router.yml` 存在且 cwd 匹配 |
+| Pi:profile 可用但所有候选都因未认证被跳过 | target provider 在 Pi 认证存储中没有凭据 | 对该 provider 执行 `/login`(或其认证流程)后重试 |
+| Pi:`/model` 里存在的 target 从不被路由到 | scoped models(`enabledModels`/`--models`)未包含它 | scope 内同时允许虚拟 `auto-router/*` profile 与真实 targets |
+| Pi:项目配置被忽略 | project 未信任 | 在 Pi 中信任该 project;`/auto-router doctor` 会显示 untrusted 状态 |
+| 所有候选都报 cooldown/熔断 | 近期失败使全链进入冷却 | 冷却会自然过期(默认 60s,`AUTO_ROUTER_COOLDOWN_MS`);用 `/auto-router status` 与事件日志的 `error` 条目定位底层 provider 失败 |
+| Pi:provider 立即返回 error event | target API 错误(配额/计费/过载)以 assistant error event 呈现 | 查看事件日志的 `error` 条目;failover 只在实质输出前发生 |
 
 ### 接入 checklist（最后确认）
 
@@ -166,12 +167,12 @@ modelRoles:
 
 配置分两层，插件自行合并（内置默认 < 用户 < 项目）：
 
-| 层 | 路径 | 生效范围 |
-|---|---|---|
-| 用户 | `~/.omp/agent/auto-router.yml` | 全局 |
-| 项目 | `<repo>/.omp/auto-router.yml` | 该项目内覆盖（同名 profile 整体替换） |
+| 层 | omp 路径 | Pi 路径 | 生效范围 |
+|---|---|---|---|
+| 用户 | `~/.omp/agent/auto-router.yml` | `<agentDir>/auto-router.yml`（`$PI_CODING_AGENT_DIR`，否则 `~/.pi/agent`） | 全局 |
+| 项目 | `<repo>/.omp/auto-router.yml` | `<repo>/.pi/auto-router.yml`（仅项目受信任时加载） | 该项目内覆盖（同名 profile 整体替换） |
 
-快速上手：复制仓库根 `auto-router.example.yml` 到 `~/.omp/agent/auto-router.yml`，把 `targets` 换成你 `/model` 里真实存在的模型。
+快速上手：复制仓库根 `auto-router.example.yml` 到你的用户层路径，把 `targets` 换成你模型选择器里真实存在的模型。
 
 ### 完整示例
 
@@ -251,7 +252,7 @@ activate:                           # 按 cwd 前缀自动激活
 | `model` | string | ✅ | 与 `/model` 显示的 id 一致 |
 | `label` | string | 否 | 展示标签 |
 | `billing` | `subscription/per-token` | 否 | 缺省 `subscription`；影响预算桶与合成 UVI |
-| `balanceEndpoint` | string | 否 | 自定义余额 API（per-token 提供商）；覆盖 provider registry 内置默认（deepseek），响应接受 deepseek 或 `{currency, total_balance}` 形状，余额显示在 `/auto-router usage` |
+| `balanceEndpoint` | string | 否 | 自定义余额 API（per-token 提供商）；**仅用户层可设置**——项目层覆盖会被剥离（安全考虑）。覆盖 provider registry 内置默认（deepseek），响应接受 deepseek 或 `{currency, total_balance}` 形状，余额显示在 `/auto-router usage` |
 | `thinking` | `off/minimal/low/medium/high/xhigh/max` | 否 | 覆盖所属 tier 的 `thinking`；failover 到该 target 时按此值下发 |
 | `thinkingCap` | `{min?, max?}` | 否 | 该模型接受的 thinking 强度范围（含端点）；覆盖 provider registry 内置默认。tier/target 配置的 thinking 超出范围时会被钳制到范围内再下发，并记一条 `warn` 事件。例：`deepseek-v4-pro` 内置 `{min: high}`（只接受 high/max，拒绝 low/medium） |
 
@@ -313,9 +314,25 @@ activate:                           # 按 cwd 前缀自动激活
 - **profiles**：同名 profile **整体替换**，不同名保留
 - **active / aliases / activate**：后层有值覆盖，无值保留前层
 
+## Pi 支持与能力降级
+
+Pi 上同一套路由核心与命令集经 Pi 适配器（`src/pi-adapter`）运行，仅通过 Pi 的**公开** ModelRegistry/Provider 接口委托真实 provider（Mode A）。需要注意的行为差异：
+
+- **Profile 模型**：每个 profile 在模型选择器中显示为 `auto-router/<profile>`；`/auto-router use <profile>` 经模型注册表切换。所有 `/auto-router` 子命令行为与 omp 一致。
+- **配置位置**：用户层 `<agentDir>/auto-router.yml`（agentDir = `$PI_CODING_AGENT_DIR`，否则 `~/.pi/agent`）；项目层 `<repo>/.pi/auto-router.yml` **仅在项目受信任时读取**——不受信任的项目会被忽略，`/auto-router doctor` 会明说。
+- **Scoped models**（`enabledModels` / `--models`）：非空 scope 是真实白名单，必须**同时**包含虚拟 `auto-router/*` profile 模型**和**全部真实 targets，否则路由无法触达 targets。
+- **UVI 不可用**：Pi 公开接口没有 usage-report 配额 API，UVI 配速显式不可用——`/auto-router uvi`、`usage`、`doctor` 都会明说，适配器**绝不**伪造配额。本地预算、会话用量、provider 余额端点、评分、冷却/熔断/failover 均不受影响。
+- **余额端点**：经 Pi 公开 auth 解析（`getApiKeyAndHeaders`）鉴权；认证、headers、动态 base URL 与 provider environment 均走公开接口，虚拟 Provider 的占位凭据不会发往上游。仅用户层配置可设置 `balanceEndpoint`。
+- **状态目录**：`<agentDir>/auto-router/`——与 omp 的 `~/.omp/agent/auto-router` 相互独立，不做跨宿主状态迁移。
+- **会话条目**：新写入使用中性、带版本的类型 `com.auto-router.v1.decision` / `com.auto-router.v1.state`；旧的 omp `com.omp.auto-router.*` 条目仍可被读取。
+- **路径激活**（配置里的 `activate:`）：最长前缀匹配；在 Pi 的 `session_start` 上生效。
+- **Print/JSON 模式**：UI 调用（widget、提示、通知）降级为 no-op；路由本身不受影响。
+
 
 
 ## 启用路由
+
+*（omp 宿主；Pi 上在模型选择器中选择 `auto-router/<profile>` 或 `/auto-router use <profile>`——见 [Pi 支持](#pi-支持与能力降级)。）*
 
 ```text
 /model 或 /switch auto-router/<profile>
@@ -345,7 +362,7 @@ modelRoles:
 
 > **拆分分析**：提示词按阶段连词（`并/然后/接着/随后/再`、`and/then`）和句末标点拆成阶段序列，**首阶段定层**——后续阶段轮到各自请求时再分类、层级随阶段流转。"帮我设计并实现一个登录功能" 首阶段是设计 → complex（实现那轮再落 standard，即 complex→standard）；"实现支付逻辑，然后设计对账方案" 首阶段是实现 → standard（设计那轮升 complex，即 standard→complex）；"按设计方案实现支付逻辑" 单阶段内含实现措辞（方案是既有产物）→ standard。硬性范围词（`重构/迁移/架构/跨文件`、`refactor/migrate/rewrite`）只在首阶段内计数。
 >
-> 混合阶段（首阶段内同时检测到规划措辞与实现措辞，如"按设计方案实现支付逻辑"）属语义难分场景：默认会再请**当前 LLM**（上次决策的目标模型；新会话则取 standard 层首选）做一次一词仲裁（trivial/simple/standard/complex），优先级为 钉层 > policy force-tier > LLM 仲裁 > 启发式分类。仲裁失败/超时/无法解析时回退启发式结果，不影响路由健康状态。`OMP_AUTO_ROUTER_LLM_ADJUDICATE=0` 可关闭。
+> 混合阶段（首阶段内同时检测到规划措辞与实现措辞，如"按设计方案实现支付逻辑"）属语义难分场景：默认会再请**当前 LLM**（上次决策的目标模型；新会话则取 standard 层首选）做一次一词仲裁（trivial/simple/standard/complex），优先级为 钉层 > policy force-tier > LLM 仲裁 > 启发式分类。仲裁失败/超时/无法解析时回退启发式结果，不影响路由健康状态。`AUTO_ROUTER_LLM_ADJUDICATE=0` 可关闭（旧名 `OMP_AUTO_ROUTER_LLM_ADJUDICATE` 仍生效）。
 
 显式钉层（优先级最高，token 剥离）：
 
@@ -470,14 +487,14 @@ roadmap blueprint strategy decompose modularize modularise restructure
 
 ## 安全与凭证
 
-- **无独立凭证存储**：API key 运行时经 omp 宿主 `modelRegistry.getApiKey` 取，配置里不写密钥、不经插件持久化。
+- **无独立凭证存储**：API key 运行时经宿主公开 auth 解析获取（omp `modelRegistry.getApiKey`；Pi `getApiKeyAndHeaders`），配置里不写密钥、不经插件持久化。
 - **传输**：余额/配额探测走 `https` + `Authorization: Bearer`，密钥不进 URL、不落日志。
 - **落盘白名单**：宿主事件（`auto_retry_*` / `credential_disabled` 等）仅保留白名单标量字段（`provider` / `model` / `attempt` / `reason`），嵌套对象与请求内容一律丢弃。
 - **写盘脱敏**：所有写向 `auto-router.events.jsonl` / `budget-*.json` / `ratings.json` 的字符串（含错误串）经 `redactSecrets` 清洗 —— Bearer token、`sk-` / `ghp_` / `AKIA` / JWT / PEM 密钥块 / URL 内嵌凭证均替换为 `[REDACTED]`。
 - **路径防护**：`state-store` 拒绝含路径分隔符 / dot-escape 的名字（`assertBareName`），配置路径为固定常量拼接。
 - **有界持久化**：`ratings.json` 默认保留最近 1000 条评分（`FeedbackTracker.maxEntries`），避免随使用无限增长。
 
-密钥脱敏与白名单规则集中在 `src/omp-adapter/redact.ts`（路径防护在 `src/core/state-store.ts`），是"防止泄露的第一道纪律"之外的纵深防御，不是替代品。
+密钥脱敏与白名单规则集中在 `src/core/redact.ts`（路径防护在 `src/core/state-store.ts`），是"防止泄露的第一道纪律"之外的纵深防御，不是替代品。
 
 ## 验证与排障
 
@@ -489,31 +506,48 @@ roadmap blueprint strategy decompose modularize modularise restructure
 事件日志（每请求一行 `decision` + 一行 `settled`，含真实 token 用量与估算成本）：
 
 ```bash
-tail ~/.omp/agent/auto-router/auto-router.events.jsonl
+tail ~/.omp/agent/auto-router/auto-router.events.jsonl        # omp
+tail "${PI_CODING_AGENT_DIR:-~/.pi/agent}/auto-router/auto-router.events.jsonl"   # Pi
 ```
 
-预算/评分持久化：`~/.omp/agent/auto-router/budget-usage.json`、`budget-limits.json`、`ratings.json`。
+预算/评分持久化：同一宿主状态目录下的 `budget-usage.json`、`budget-limits.json`、`ratings.json`。
+
+仓库级验证（在包目录下执行）：
+
+```bash
+bun run verify                        # 全量测试 + 三个隔离类型检查（runtime / omp adapter / pi adapter）
+./node_modules/.bin/pi --list-models -e .   # Pi 模型发现探测：列出 auto-router/<profile> 模型
+```
 
 ## 局限
 
 - 虚拟模型元数据（contextWindow 等）为静态值，仅影响 `/model` 展示
 - 多会话（RPC）下 ctx 为进程级单例，按"单活动会话"假设运行
-- `OMP_AUTO_ROUTER_UVI_HARD` / `OMP_AUTO_ROUTER_CONFIDENCE_THRESHOLD` / `OMP_AUTO_ROUTER_QUOTA_REFRESH_MS` / `OMP_AUTO_ROUTER_COOLDOWN_MS` 环境开关已支持；其余 `OMP_AUTO_ROUTER_*` 开关尚未实现
+- 环境开关按 `AUTO_ROUTER_*` > `OMP_AUTO_ROUTER_*`（旧别名）> `PI_AUTO_ROUTER_*` 顺序解析；已支持后缀：`UVI_HARD`、`CONFIDENCE_THRESHOLD`、`QUOTA_REFRESH_MS`、`COOLDOWN_MS`、`LLM_ADJUDICATE`，其余后缀尚未实现
+- Pi 上 UVI 配额配速不可用（无公开 usage-report API）——见 [Pi 支持与能力降级](#pi-支持与能力降级)
 - 插件包尚未走 omp 市场/`omp install` 安装形态（当前为目录引用）
+
+## 兼容性与维护
+
+扩展**绝不修改、patch 或 vendoring 宿主源码**（omp 或 Pi）。兼容性只通过公开宿主接口 + 运行时能力探测（`/auto-router doctor`）维持；某能力缺失时，依赖它的功能显式降级，而不是 monkey-patch 绕过去。
 
 ## 开发
 ```bash
 bun install
-bun test tests/          # core + adapter 全量（344 用例）
-bun run check            # core tsc
-bun run check:adapter    # adapter tsc（宿主类型为结构性子集 + ambient shim）
+bun test tests/          # 全量测试（core + runtime + 两个适配器）
+bun run verify           # 测试 + 下面三个隔离类型检查
+bun run check:runtime    # runtime tsc
+bun run check:adapter    # omp adapter tsc（宿主类型为结构性子集 + ambient shim）
+bun run check:pi         # Pi adapter tsc（基于 @earendil-works/pi-* 公开类型）
 ```
 
 目录结构：
 
 ```
-src/core/          路由引擎（宿主机无关，零 omp import；bun:test 直测）
-src/omp-adapter/   omp 适配层（唯一接触 ExtensionAPI 的地方）
-src/omp-adapter/redact.ts   密钥脱敏 + 事件落盘白名单
+src/core/          路由引擎（宿主机无关，零宿主 import；bun:test 直测）
+src/core/redact.ts       密钥脱敏 + 事件落盘白名单
+src/runtime/       共享 RouterRuntime：编排、failover、预算、命令、widget、配置
+src/omp-adapter/   omp 适配层（ExtensionAPI 映射）
+src/pi-adapter/    Pi 适配层（公开 ModelRegistry/Provider 委托）
 auto-router.example.yml
 ```

@@ -3,9 +3,11 @@
  * Routing analytics over the auto-router event log (D6).
  *
  * Usage:
- *   bun scripts/routing-stats.ts [path-to-events.jsonl] [--tail N]
+ *   bun scripts/routing-stats.ts [path-to-events.jsonl] [--host omp|pi] [--tail N]
  *
- * Default path: ~/.omp/agent/auto-router/auto-router.events.jsonl
+ * Default path: the OMP state directory (~/.omp/agent/auto-router), or the Pi
+ * state directory with `--host pi` ($PI_CODING_AGENT_DIR/auto-router, else
+ * ~/.pi/agent/auto-router). An explicit path argument always wins.
  * Aggregates decisions per profile/tier/target, failover counts, and the top
  * error reasons, from the append-only JSONL the adapter writes per decision.
  */
@@ -29,9 +31,20 @@ interface RouterEventShape {
 const args = process.argv.slice(2);
 const tailIndex = args.indexOf("--tail");
 const tail = tailIndex === -1 ? undefined : Number(args[tailIndex + 1]);
+const hostIndex = args.indexOf("--host");
+const host = hostIndex === -1 ? "omp" : args[hostIndex + 1];
+if (host !== "omp" && host !== "pi") {
+	console.error(`unknown --host ${host} (expected omp|pi)`);
+	process.exit(1);
+}
+const consumedValueIndexes = new Set([tailIndex + 1, hostIndex + 1].filter((index) => index > 0));
 const filePath =
-	args.find((arg, index) => !arg.startsWith("--") && (tailIndex === -1 || index !== tailIndex + 1)) ??
-	join(homedir(), ".omp", "agent", "auto-router", "auto-router.events.jsonl");
+	args.find((arg, index) => !arg.startsWith("--") && !consumedValueIndexes.has(index)) ??
+	join(
+		host === "pi" ? (process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent")) : join(homedir(), ".omp", "agent"),
+		"auto-router",
+		"auto-router.events.jsonl",
+	);
 
 let raw: string;
 try {

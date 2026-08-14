@@ -6,20 +6,20 @@
 
 **Status:** ready-for-agent
 
-- [ ] Package manifest 同时声明 OMP 和 Pi 扩展入口，并包含 Pi package discoverability metadata。
-- [ ] Host packages 作为 peer dependencies 声明；兼容范围由公开 capability contract 和测试矩阵定义，而不是锁死本机单一版本。
-- [ ] Core、Router Runtime、OMP Adapter 和 Pi Adapter 有清晰的独立 type-check/test 命令，并提供一个全量验证命令。
-- [ ] 中文和英文文档说明 OMP 与 Pi 的安装方式、配置位置、profile 选择、reload 和卸载方式。
-- [ ] 文档说明 Pi scoped models 需要同时允许虚拟 profile 和真实 targets。
-- [ ] 文档列出中性环境变量、旧 OMP fallback 和优先级。
-- [ ] 文档明确 Pi usage-report UVI 不可用，但 local budget、usage、balance 和 failover 可用。
-- [ ] 示例配置使用双宿主中性术语，并提醒用户替换成模型注册表中真实存在的 provider/model。
-- [ ] Doctor 和故障排查文档覆盖模型不存在、未认证、scope 排除、project untrusted、全链 cooldown 和 Provider error。
-- [ ] Routing analytics 脚本能够针对 OMP 或 Pi state directory 工作，或接受明确的日志路径。
-- [ ] Pi 真实验收覆盖安装、模型选择、profile 切换、shortcut 剥离、文本、工具调用、failover、abort、reload 和 session restore。
-- [ ] OMP 真实验收覆盖原有安装、profile 路由、failover、quota、commands 和 state restore。
-- [ ] 文档明确禁止通过修改、patch、monkey-patch、vendor 或复制 OMP/Pi 源码来启用兼容性。
-- [ ] 在可行范围内，真实验收覆盖最老声明兼容版本和当前支持版本，并记录 required/optional capability matrix。
-- [ ] Release notes 标明测试过的 OMP/Pi 版本范围、公开 capability 边界、状态命名兼容和 UVI 降级。
-- [ ] 构建、测试和安装流程不会写入或覆盖 OMP/Pi 安装目录。
-- [ ] 不在本 ticket 发布 npm 包或删除旧 OMP 支持。
+- [x] Package manifest 同时声明 OMP 和 Pi 扩展入口，并包含 Pi package discoverability metadata。
+- [x] Host packages 作为 peer dependencies 声明；兼容范围由公开 capability contract 和测试矩阵定义，而不是锁死本机单一版本。
+- [x] Core、Router Runtime、OMP Adapter 和 Pi Adapter 有清晰的独立 type-check/test 命令，并提供一个全量验证命令。
+- [x] 中文和英文文档说明 OMP 与 Pi 的安装方式、配置位置、profile 选择、reload 和卸载方式。
+- [x] 文档说明 Pi scoped models 需要同时允许虚拟 profile 和真实 targets。
+- [x] 文档列出中性环境变量、旧 OMP fallback 和优先级。
+- [x] 文档明确 Pi usage-report UVI 不可用，但 local budget、usage、balance 和 failover 可用。
+- [x] 示例配置使用双宿主中性术语，并提醒用户替换成模型注册表中真实存在的 provider/model。
+- [x] Doctor 和故障排查文档覆盖模型不存在、未认证、scope 排除、project untrusted、全链 cooldown 和 Provider error。
+- [x] Routing analytics 脚本能够针对 OMP 或 Pi state directory 工作，或接受明确的日志路径。
+- [ ] Pi 真实验收覆盖安装、模型选择、profile 切换、shortcut 剥离、文本、工具调用、failover、abort、reload 和 session restore。(契约测试与 pi --list-models 探测通过;真实安装/会话验收需人工执行)
+- [ ] OMP 真实验收覆盖原有安装、profile 路由、failover、quota、commands 和 state restore。(580 项自动化测试通过;真实 OMP 会话验收需人工执行)
+- [x] 文档明确禁止通过修改、patch、monkey-patch、vendor 或复制 OMP/Pi 源码来启用兼容性。
+- [ ] 在可行范围内，真实验收覆盖最老声明兼容版本和当前支持版本，并记录 required/optional capability matrix。(compat 基于公开 capability contract + probe;版本矩阵真实验收未执行,release notes 记录 dev fixture Pi 0.84.1)
+- [x] Release notes 标明测试过的 OMP/Pi 版本范围、公开 capability 边界、状态命名兼容和 UVI 降级(CHANGELOG Unreleased Compatibility 节)。
+- [x] 构建、测试和安装流程不会写入或覆盖 OMP/Pi 安装目录。
+- [x] 不在本 ticket 发布 npm 包或删除旧 OMP 支持。
