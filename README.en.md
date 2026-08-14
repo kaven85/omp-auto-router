@@ -317,7 +317,7 @@ With no config file, or when all layers fail to parse, the plugin falls back to 
 
 On Pi the same routing core and command set run through the Pi adapter (`src/pi-adapter`), which delegates to real providers only via Pi's **public** ModelRegistry/Provider interfaces (Mode A). Behavior differences to be aware of:
 
-- **Profile models**: every profile appears in the model selector as `auto-router/<profile>`; `/auto-router use <profile>` switches through the model registry. All `/auto-router` subcommands behave the same as on omp.
+- **Profile models**: every profile appears in the model selector as `auto-router/<profile>`; `/auto-router use <profile>` switches through the model registry. Command names and argument grammar are shared with omp; host-capability differences are explicit below.
 - **Config locations**: user layer `<agentDir>/auto-router.yml` (agentDir = `$PI_CODING_AGENT_DIR`, else `~/.pi/agent`); project layer `<repo>/.pi/auto-router.yml` is read **only when the project is trusted** — untrusted projects are ignored, and `/auto-router doctor` says so.
 - **Scoped models** (`enabledModels` / `--models`): a non-empty scope is a real allowlist. It must include **both** the virtual `auto-router/*` profile models **and** every real target, or routing cannot reach the targets.
 - **UVI unavailable**: Pi's public interface exposes no usage-report quota API, so UVI pacing is explicitly unavailable — `/auto-router uvi`, `usage`, and `doctor` say so, and the adapter never fabricates quota. Local budgets, session usage, provider balance endpoints, ratings, and cooldown/circuit/failover all still work.
@@ -326,6 +326,18 @@ On Pi the same routing core and command set run through the Pi adapter (`src/pi-
 - **Session entries**: new writes use the neutral, versioned types `com.auto-router.v1.decision` / `com.auto-router.v1.state`; legacy omp `com.omp.auto-router.*` entries are still read back.
 - **Path activation** (`activate:` in config): longest-prefix match; works on Pi `session_start`.
 - **Print/JSON modes**: UI calls (widget, prompts, notifications) degrade to no-ops; routing itself is unaffected.
+
+### Command-level Pi differences
+
+| Command | Pi behavior | omp difference |
+|---|---|---|
+| `status` | Identifies `mode: A (stream delegation)` after the active profile and latest decision. | omp reports its own adapter mode/state. |
+| `doctor` | Reports the required public Mode A surface, project-trust state, and UVI as an **optional unavailable** capability. | The omp adapter reports its H1–H7 host probe matrix and can expose quota capabilities. |
+| `uvi show\|enable\|disable\|refresh` | Every action returns the explicit unavailable notice; it does not toggle state or fabricate/refetch quota. | Available only when omp exposes usage-report quota data. |
+| `usage [page]` | Shows settled local calls, local budgets, and any authenticated provider balance; UVI/quota windows are unavailable. | Can include host usage-report quota windows. |
+| `use <profile>` | Resolves the already-registered `auto-router/<profile>` through Pi's public model registry. With scoped models, both the virtual profile and real targets must be allowed. | omp resolves through its model facade/model-role configuration. |
+| `reload` | Re-reads the user layer and the project layer only when Pi trusts the project. | omp reads its normal user/project layers. |
+| `budget`, `shadow`, `rules`, `rate`, `list`, `show`, `explain`, `help` | Same command semantics. `rate` and a populated `explain` require a settled routed request; headless print/JSON UI output is a safe no-op. | No intentional behavior difference. |
 
 
 
@@ -460,11 +472,11 @@ Any of these strong signals, with no multi-step word claiming complex:
 | `/auto-router profiles` / `current` | list / current profile | `/auto-router profiles` |
 | `/auto-router use <profile\|alias>` | switch profile (persisted; survives resume/branch) | `/auto-router use economy` |
 | `/auto-router list` / `show <profile>` | current profile's tier chain / profile details | `/auto-router show premium` |
-| `/auto-router explain` | full reasoning chain of the last decision (incl. exclusions, budget, UVI) | `/auto-router explain` |
-| `/auto-router doctor` | capability probe matrix (H1–H7) + config errors | `/auto-router doctor` |
+| `/auto-router explain` | full reasoning chain of the last decision (including host-available quota data) | `/auto-router explain` |
+| `/auto-router doctor` | host capability diagnostics + configuration errors (omp: H1–H7; Pi: Mode A/trust/UVI) | `/auto-router doctor` |
 | `/auto-router reload` | re-read auto-router.yml | `/auto-router reload` |
 | `/auto-router budget show\|set <p> <usd> [monthly]\|clear <p>` | budget management (warn 80% / block 100%) | `/auto-router budget set google 20 monthly` |
-| `/auto-router uvi show\|enable\|disable\|refresh` | UVI quota pacing | `/auto-router uvi show` |
+| `/auto-router uvi show\|enable\|disable\|refresh` | usage-report quota pacing; Pi explicitly reports it unavailable for every action | `/auto-router uvi show` |
 | `/auto-router shadow show\|enable\|disable` | shadow mode | `/auto-router shadow enable` |
 | `/auto-router rate good\|bad [comment]` | decision feedback (persisted) | `/auto-router rate good good pick` |
 | `/auto-router rules [show]\|add\|remove <list> <words…>\|reset` | view/edit complexity classification rules (persisted; takes effect next request) | `/auto-router rules add mechanicalOp 同步数据` |

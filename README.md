@@ -318,7 +318,7 @@ activate:                           # 按 cwd 前缀自动激活
 
 Pi 上同一套路由核心与命令集经 Pi 适配器（`src/pi-adapter`）运行，仅通过 Pi 的**公开** ModelRegistry/Provider 接口委托真实 provider（Mode A）。需要注意的行为差异：
 
-- **Profile 模型**：每个 profile 在模型选择器中显示为 `auto-router/<profile>`；`/auto-router use <profile>` 经模型注册表切换。所有 `/auto-router` 子命令行为与 omp 一致。
+- **Profile 模型**：每个 profile 在模型选择器中显示为 `auto-router/<profile>`；`/auto-router use <profile>` 经模型注册表切换。命令名与参数语法和 omp 共用；宿主能力差异见下表。
 - **配置位置**：用户层 `<agentDir>/auto-router.yml`（agentDir = `$PI_CODING_AGENT_DIR`，否则 `~/.pi/agent`）；项目层 `<repo>/.pi/auto-router.yml` **仅在项目受信任时读取**——不受信任的项目会被忽略，`/auto-router doctor` 会明说。
 - **Scoped models**（`enabledModels` / `--models`）：非空 scope 是真实白名单，必须**同时**包含虚拟 `auto-router/*` profile 模型**和**全部真实 targets，否则路由无法触达 targets。
 - **UVI 不可用**：Pi 公开接口没有 usage-report 配额 API，UVI 配速显式不可用——`/auto-router uvi`、`usage`、`doctor` 都会明说，适配器**绝不**伪造配额。本地预算、会话用量、provider 余额端点、评分、冷却/熔断/failover 均不受影响。
@@ -327,6 +327,18 @@ Pi 上同一套路由核心与命令集经 Pi 适配器（`src/pi-adapter`）运
 - **会话条目**：新写入使用中性、带版本的类型 `com.auto-router.v1.decision` / `com.auto-router.v1.state`；旧的 omp `com.omp.auto-router.*` 条目仍可被读取。
 - **路径激活**（配置里的 `activate:`）：最长前缀匹配；在 Pi 的 `session_start` 上生效。
 - **Print/JSON 模式**：UI 调用（widget、提示、通知）降级为 no-op；路由本身不受影响。
+
+### Pi 命令级差异
+
+| 命令 | Pi 行为 | 与 omp 的差异 |
+|---|---|---|
+| `status` | 在 profile 和最近决策后显示 `mode: A (stream delegation)`。 | omp 显示自身 Adapter 的模式/状态。 |
+| `doctor` | 报告所需的公开 Mode A 接口、项目可信状态，并把 UVI 标为**可选且不可用**。 | omp 报告 H1–H7 宿主探测矩阵，并可暴露 quota 能力。 |
+| `uvi show\|enable\|disable\|refresh` | 任意 action 都返回明确的不可用提示；不会切换状态、伪造或刷新 quota。 | 仅 omp 暴露 usage-report quota 时可用。 |
+| `usage [page]` | 显示 settled 本地调用、本地预算和已认证 provider 余额；没有 UVI/quota window。 | 可包含宿主 usage-report 的 quota window。 |
+| `use <profile>` | 经 Pi 公开模型注册表解析已注册的 `auto-router/<profile>`。使用 scoped models 时，虚拟 profile 与真实 targets 都必须在 scope 内。 | omp 经其模型 facade / model-role 配置解析。 |
+| `reload` | 重读用户层；仅在 Pi 信任项目时重读项目层。 | omp 按其正常 user/project 层读取。 |
+| `budget`、`shadow`、`rules`、`rate`、`list`、`show`、`explain`、`help` | 命令语义相同。`rate` 与有内容的 `explain` 需要已 settled 的路由请求；headless print/JSON 的 UI 输出安全降级为 no-op。 | 无刻意行为差异。 |
 
 
 
@@ -461,11 +473,11 @@ roadmap blueprint strategy decompose modularize modularise restructure
 | `/auto-router profiles` / `current` | 列表 / 当前 profile | `/auto-router profiles` |
 | `/auto-router use <profile\|alias>` | 切换 profile（持久化，resume/branch 保留） | `/auto-router use economy` |
 | `/auto-router list` / `show <profile>` | 当前 profile 的 tier 链 / 某 profile 详情 | `/auto-router show premium` |
-| `/auto-router explain` | 上次决策的完整推理链（含排除原因、预算、UVI） | `/auto-router explain` |
-| `/auto-router doctor` | 能力探测矩阵（H1–H7）+ 配置错误 | `/auto-router doctor` |
+| `/auto-router explain` | 上次决策的完整推理链（含宿主可提供的 quota 数据） | `/auto-router explain` |
+| `/auto-router doctor` | 宿主能力诊断 + 配置错误（omp：H1–H7；Pi：Mode A/信任/UVI） | `/auto-router doctor` |
 | `/auto-router reload` | 重读 auto-router.yml | `/auto-router reload` |
 | `/auto-router budget show\|set <p> <usd> [monthly]\|clear <p>` | 预算管理（80% 警告 / 100% 阻断） | `/auto-router budget set google 20 monthly` |
-| `/auto-router uvi show\|enable\|disable\|refresh` | UVI 配额配速 | `/auto-router uvi show` |
+| `/auto-router uvi show\|enable\|disable\|refresh` | usage-report 配额配速；Pi 对任意 action 都显式提示不可用 | `/auto-router uvi show` |
 | `/auto-router shadow show\|enable\|disable` | 影子模式 | `/auto-router shadow enable` |
 | `/auto-router rate good\|bad [comment]` | 决策反馈（持久化） | `/auto-router rate good 选得好` |
 | `/auto-router rules [show]\|add\|remove <list> <词…>\|reset` | 查看/编辑复杂度判定规则（持久化，下一请求生效） | `/auto-router rules add mechanicalOp 同步数据` |
