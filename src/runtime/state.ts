@@ -8,13 +8,13 @@ import { LatencyTracker } from "../core/latency-tracker";
 import { ProfileRegistry } from "../core/profile-registry";
 import { JsonStateStore } from "../core/state-store";
 import type { BudgetLimit, BudgetUsage, RatingEntry, RouterConfig } from "../core/types";
+import { cooldownAfterFailureMs } from "./env";
 import type { RouterRuntimeState } from "./router-runtime";
 
 export interface PersistentRuntimeState extends RouterRuntimeState {
 	config: RouterConfig;
 	stateStore: JsonStateStore;
 	configErrors: string[];
-	quotaAvailable: boolean;
 }
 
 export function createPersistentRuntimeState(config: RouterConfig, stateDir: string, cwd: string, configErrors: string[] = []): PersistentRuntimeState {
@@ -36,7 +36,6 @@ export function createPersistentRuntimeState(config: RouterConfig, stateDir: str
 		config,
 		stateStore,
 		configErrors,
-		quotaAvailable: false,
 		registry: new ProfileRegistry(config, { cwd }),
 		circuit,
 		latency,
@@ -52,6 +51,9 @@ export function createPersistentRuntimeState(config: RouterConfig, stateDir: str
 		sessionUsage: { calls: new Map(), cost: new Map(), thinking: new Map() },
 		uviEnabled: true,
 		shadowEnabled: false,
+		cooldownAfterFailureMs: cooldownAfterFailureMs(),
+		quotaCache: { at: 0, data: [] },
+		balanceCache: {},
 	};
 }
 

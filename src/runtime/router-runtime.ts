@@ -1,6 +1,6 @@
 import { BudgetTracker } from "../core/budget-tracker";
 import { CircuitBreaker } from "../core/circuit-breaker";
-import { type ClassifierOverrides } from "../core/complexity-classifier";
+import { classifyComplexity, type ClassifierOverrides } from "../core/complexity-classifier";
 import { classifyIntent } from "../core/intent-classifier";
 import { DecisionStore } from "../core/decision-store";
 import { EventLog } from "../core/event-log";
@@ -10,8 +10,11 @@ import { LatencyTracker } from "../core/latency-tracker";
 import { route } from "../core/pipeline";
 import { ProfileRegistry } from "../core/profile-registry";
 import { parseShortcut } from "../core/shortcut-parser";
+import { confidenceThreshold, llmAdjudicationEnabled, uviHardMode } from "./env";
+import type { ProviderBalance } from "./provider-dictionary";
 import type {
 	CandidateInfo,
+	ComplexityTier,
 	ModelCost,
 	QuotaSnapshot,
 	RouteTarget,
@@ -43,6 +46,19 @@ export interface RouterRuntimeState {
 	classifierOverrides?: ClassifierOverrides;
 	/** A recent failing test/build raises the next request's tier floor. */
 	testFailureAt?: number;
+	/** Non-fatal configuration errors surfaced by `/auto-router doctor`. */
+	configErrors?: string[];
+	/** Post-failure target exclusion window; adapters set it from the env chain. */
+	cooldownAfterFailureMs?: number;
+	/** Throttled quota snapshot cache; only populated when the host exposes quota reports. */
+	quotaCache?: { at: number; data: QuotaSnapshot[] };
+	/** Last fetched prepaid balances (balance-capable providers only). */
+	balanceCache?: Record<string, ProviderBalance>;
+	/**
+	 * Last rendered widget payload for duplicate suppression. Instance-local on
+	 * purpose: one session must never suppress another session's first render.
+	 */
+	widgetPayload?: string;
 }
 
 export interface RouterRuntimeHost {
@@ -62,6 +78,12 @@ export interface RouterRuntimeHost {
 	isRetryable?(error: unknown): boolean;
 	/** Clamp a router-selected thinking level to a target's public capabilities. */
 	clampThinking?(target: RouteTarget, level: ThinkingLevel): ThinkingLevel;
+	/**
+	 * Optional LLM adjudication of mixed-phase prompts (fail-open: undefined
+	 * keeps the heuristic decision). The adapter streams the target through
+	 * host-owned credentials; the runtime never sees them.
+	 */
+	adjudicate?(target: RouteTarget, prompt: string, signal?: AbortSignal): Promise<{ tier: ComplexityTier; model: string } | undefined>;
 	/** Persist a host-neutral decision entry in the active session branch. */
 	persistDecision(type: typeof ROUTER_DECISION_ENTRY, decision: RoutingDecision): void;
 	setStatus?(text: string): void;
@@ -113,6 +135,47 @@ export class RouterRuntime {
 			const floor = priorTier ?? "simple";
 			priorTier = TIER_LADDER[Math.min(TIER_LADDER.indexOf(floor) + 1, TIER_LADDER.length - 1)];
 		}
+
+		// LLM adjudication: mixed-phase prompts ("设计并实现 X") are
+		// semantically ambiguous for keyword heuristics — ask the session's
+		// current LLM to pick the tier. Fail-open: errors/timeouts keep the
+		// heuristic decision. Runs before route() so the adjudicated tier
+		// flows through the normal precedence (shortcut > policy > adjudication).
+		const shortcut = parseShortcut(rawPrompt);
+		let adjudicatedTier: ComplexityTier | undefined;
+		let adjudicatorModel: string | undefined;
+		if (this.host.adjudicate && llmAdjudicationEnabled()) {
+			const pre = classifyComplexity({
+				prompt: shortcut.cleanPrompt,
+				estimatedTokens,
+				hasImages: request.hasImages ?? hasImages,
+				conversationDepth: this.state.decisions.list().length,
+				intent: classifyIntent(shortcut.cleanPrompt),
+				shortcut,
+				...(priorTier !== undefined ? { priorTier } : {}),
+				overrides: this.state.classifierOverrides,
+			});
+			if (pre.signals.mixedPhase) {
+				const adjudicatorTarget = this.state.decisions.last()?.target
+					?? this.state.registry.tierConfig(requestedProfile, "standard")?.targets[0];
+				if (adjudicatorTarget) {
+					try {
+						const adjudicated = await this.host.adjudicate(
+							adjudicatorTarget,
+							shortcut.cleanPrompt,
+							request.options?.signal as AbortSignal | undefined,
+						);
+						if (adjudicated) {
+							adjudicatedTier = adjudicated.tier;
+							adjudicatorModel = adjudicated.model;
+						}
+					} catch {
+						// fail-open: a broken adjudicator never breaks routing
+					}
+				}
+			}
+		}
+
 		const { decision, cleanPrompt } = route(
 			{
 				rawPrompt,
@@ -123,6 +186,7 @@ export class RouterRuntime {
 				candidates,
 				quota,
 				estimatedTokens,
+				...(adjudicatedTier !== undefined ? { adjudicatedTier } : {}),
 				now: new Date(this.now()),
 			},
 			{
@@ -130,9 +194,14 @@ export class RouterRuntime {
 				circuit: this.state.circuit,
 				latency: this.state.latency,
 				budgets: this.state.budgets,
+				uviHardMode: uviHardMode(),
+				confidenceThreshold: confidenceThreshold(),
 				classifierOverrides: this.state.classifierOverrides,
 			},
 		);
+		if (adjudicatedTier !== undefined && adjudicatorModel !== undefined) {
+			decision.reasoning.push(`llm adjudication by ${adjudicatorModel} → ${adjudicatedTier}`);
+		}
 
 		const tier = this.state.registry.tierConfig(decision.profile, decision.tier);
 		const tierThinking = tier?.thinking;
@@ -189,7 +258,7 @@ export class RouterRuntime {
 			onTargetFailed: (target: RouteTarget, error: unknown) => {
 				const key = targetKey(target);
 				this.state.circuit.recordFailure(key, this.now());
-				this.state.cooldowns.set(key, { until: this.now() + DEFAULT_COOLDOWN_MS, reason: formatError(error) });
+				this.state.cooldowns.set(key, { until: this.now() + (this.state.cooldownAfterFailureMs ?? DEFAULT_COOLDOWN_MS), reason: formatError(error) });
 				this.state.eventLog.append({ type: "error", at: this.now(), provider: target.provider, model: target.model, error: formatError(error) });
 			},
 			onFailover: (from: RouteTarget, to: RouteTarget, error: unknown) => {

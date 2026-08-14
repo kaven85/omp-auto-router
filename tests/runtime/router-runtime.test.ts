@@ -126,4 +126,82 @@ describe("RouterRuntime", () => {
 		expect(state.circuit.state("first/one", Date.now())).toBe("closed");
 		expect(state.sessionUsage.calls.get("second/two")).toBe(1);
 	});
+
+	test("mixed-phase prompts are adjudicated through the host hook, fail open", async () => {
+		const state = createState();
+		const host = createHost([{ type: "done", message: {} }]);
+		let adjudications = 0;
+		host.adjudicate = async () => {
+			adjudications++;
+			return { tier: "complex", model: "first/one" };
+		};
+		const runtime = new RouterRuntime(state, host);
+		// "按方案实现" mixes implementation phrasing with soft planning words.
+		for await (const _event of runtime.stream(request("按照设计方案实现登录功能模块"))) { /* drain */ }
+
+		expect(adjudications).toBe(1);
+		expect(state.lastDecision?.decision.tier).toBe("complex");
+		expect(state.lastDecision?.decision.reasoning.some((line) => line.includes("llm adjudication by first/one → complex"))).toBe(true);
+	});
+
+	test("adjudication failure keeps the heuristic decision", async () => {
+		const state = createState();
+		const host = createHost([{ type: "done", message: {} }]);
+		host.adjudicate = async () => {
+			throw new Error("adjudicator down");
+		};
+		const runtime = new RouterRuntime(state, host);
+		let decision: string | undefined;
+		try {
+			for await (const _event of runtime.stream(request("按照设计方案实现登录功能模块"))) { /* drain */ }
+			decision = state.lastDecision?.decision.tier;
+		} catch {
+			decision = "threw";
+		}
+		// Fail-open means: the request completed and no adjudication line exists.
+		expect(decision).toBe("standard");
+		expect(state.lastDecision?.decision.reasoning.some((line) => line.includes("llm adjudication"))).toBe(false);
+	});
+
+	test("the adjudicator is the session's current model after a decision", async () => {
+		const state = createState();
+		const host = createHost([{ type: "done", message: {} }]);
+		const adjudicatorTargets: string[] = [];
+		host.adjudicate = async (target) => {
+			adjudicatorTargets.push(`${target.provider}/${target.model}`);
+			return { tier: "standard", model: "x" };
+		};
+		const runtime = new RouterRuntime(state, host);
+		// Fresh session: falls back to the profile's standard-tier first target.
+		for await (const _event of runtime.stream(request("按照设计方案实现登录功能模块"))) { /* drain */ }
+		expect(adjudicatorTargets).toEqual(["first/one"]);
+
+		// After the decision settled on second/two, adjudication follows it.
+		state.decisions.record({
+			...state.lastDecision!.decision,
+			target: { provider: "second", model: "two" },
+		});
+		for await (const _event of runtime.stream(request("按照设计方案实现登录功能模块"))) { /* drain */ }
+		expect(adjudicatorTargets).toEqual(["first/one", "second/two"]);
+	});
+
+	test("AUTO_ROUTER_LLM_ADJUDICATE=0 skips adjudication", async () => {
+		const prior = process.env.AUTO_ROUTER_LLM_ADJUDICATE;
+		process.env.AUTO_ROUTER_LLM_ADJUDICATE = "0";
+		try {
+			const state = createState();
+			const host = createHost([{ type: "done", message: {} }]);
+			let adjudications = 0;
+			host.adjudicate = async () => {
+				adjudications++;
+				return { tier: "standard", model: "first/one" };
+			};
+			const runtime = new RouterRuntime(state, host);
+			for await (const _event of runtime.stream(request("按照设计方案实现登录功能模块"))) { /* drain */ }
+			expect(adjudications).toBe(0);
+		} finally {
+			if (prior === undefined) delete process.env.AUTO_ROUTER_LLM_ADJUDICATE;
+			else process.env.AUTO_ROUTER_LLM_ADJUDICATE = prior;
+		}
+	});
 });
