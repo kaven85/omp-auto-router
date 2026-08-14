@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -429,17 +430,18 @@ describe("loadRouterConfigFile", () => {
 		expect(result).toEqual({ errors: [] });
 	});
 
-	test("valid file loads", async () => {
+	test("valid file loads through the portable Node filesystem path", async () => {
 		const path = join(dir, "auto-router.yml");
-		await Bun.write(path, VALID_YAML);
+		await writeFile(path, VALID_YAML);
 		const { config, errors } = await loadRouterConfigFile(path);
 		expect(errors).toEqual([]);
 		expect(config?.active).toBe("premium");
 	});
 
+
 	test("YAML syntax error is reported", async () => {
 		const path = join(dir, "broken.yml");
-		await Bun.write(path, "profiles: [unclosed");
+		await writeFile(path, "profiles: [unclosed");
 		const { config, errors } = await loadRouterConfigFile(path);
 		expect(config).toBeUndefined();
 		expect(errors.length).toBe(1);
@@ -447,7 +449,7 @@ describe("loadRouterConfigFile", () => {
 
 	test("schema-invalid YAML is reported, never throws", async () => {
 		const path = join(dir, "invalid.yml");
-		await Bun.write(path, "profiles: {}\n");
+		await writeFile(path, "profiles: {}\n");
 		const { config, errors } = await loadRouterConfigFile(path);
 		expect(config).toBeUndefined();
 		expect(errors.length).toBeGreaterThan(0);

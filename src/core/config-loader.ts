@@ -8,6 +8,8 @@
  * `errors` is empty.
  */
 
+import { readFile } from "node:fs/promises";
+
 import { parse } from "yaml";
 import {
 	COMPLEXITY_TIERS,
@@ -502,11 +504,9 @@ export function mergeRouterConfigs(...layers: (RouterConfig | undefined)[]): Rou
  * reported in `errors`.
  */
 export async function loadRouterConfigFile(path: string): Promise<ConfigLoadResult> {
-	const file = Bun.file(path);
 	let text: string;
 	try {
-		if (!(await file.exists())) return { errors: [] };
-		text = await file.text();
+		text = await readFile(path, "utf8");
 	} catch (err) {
 		if (isNotFoundError(err)) return { errors: [] };
 		const message = err instanceof Error ? err.message : String(err);
