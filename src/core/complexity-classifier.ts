@@ -6,7 +6,7 @@
  * take precedence over everything else.
  */
 
-import { classifyContextSize } from "./context-analyzer";
+import { classifyContextSize, estimateTokens } from "./context-analyzer";
 import { detectCodeSignals } from "./intent-classifier";
 import type {
 	ComplexityResult,
@@ -24,8 +24,6 @@ export interface ClassifyComplexityInput {
 	estimatedTokens: number;
 	/** The request carries image input. */
 	hasImages: boolean;
-	/** Consecutive turns on the same task; 0 = fresh conversation. */
-	conversationDepth: number;
 	/** Tier of the previous decision in this session, for sticky escalation. */
 	priorTier?: ComplexityTier;
 	/** Intent classification of the prompt, when available. */
@@ -37,7 +35,7 @@ export interface ClassifyComplexityInput {
 }
 
 /**
-/** Multi-step / cross-cutting phrasing that pushes a task to `complex`.
+ * Multi-step / cross-cutting phrasing that pushes a task to `complex`.
  * English and Chinese; matched case-insensitively as substrings.
  */
 export const MULTI_STEP_KEYWORDS: readonly string[] = [
@@ -69,17 +67,6 @@ export const MULTI_STEP_KEYWORDS: readonly string[] = [
 	"蓝图",
 	"路线图",
 	"拆解",
-	// 炒股/量化：策略级任务需要多步推理，归入 complex
-	"回测",
-	"量化策略",
-	"策略开发",
-	"全市场筛选",
-	"全市场扫描",
-	"组合优化",
-	"组合管理",
-	"因子挖掘",
-	"选股引擎",
-	"产业链全景",
 ] as const;
 
 /**
@@ -110,11 +97,6 @@ export const MULTI_STEP_WORD_TERMS: readonly string[] = [
 	"modularize",
 	"modularise",
 	"restructure",
-	// quant/finance strategy-level terms
-	"backtest",
-	"backtesting",
-	"rebalance",
-	"rebalancing",
 ] as const;
 
 /** Whole-word regexes for MULTI_STEP_WORD_TERMS, precompiled once at module load. */
@@ -236,9 +218,8 @@ export const REPAIR_DEBUG_KEYWORDS: readonly string[] = [
 	"为什么报错",
 ] as const;
 
-/** Estimated-token ceiling for the short-Q&A signal. */
+/** Estimated-token ceiling for the short-Q&A signal — measured on the PROMPT, not the session context. */
 export const SHORT_QA_MAX_TOKENS = 200;
-
 /**
  * Mechanical dev-operation terms matched as WHOLE WORDS (word-boundary
  * regex), English only. These are execute-don't-design operations: the model
@@ -469,8 +450,21 @@ export function classifyComplexity(input: ClassifyComplexityInput): ComplexityRe
 	// multi-step) — "设计并实现 X" is a design request now (complex); the
 	// build gets its own turn later (standard). Follow-up phases are
 	// classified when their turn arrives.
-	const currentTask =
-		lower.split(TASK_SPLIT_RE).find((task) => task.trim().length > 0) ?? lower;
+	//
+	// Exception: a prompt may open with pure background ("我们有一个运行了 8
+	// 年的单体应用。") whose phase carries no task phrasing at all — picking
+	// it would hide the actual ask in a later phase behind a standard tier.
+	// Skip leading context-only phases; the first phase WITH task phrasing
+	// (implementation or multi-step, soft or hard) drives the phase signals.
+	// "实现 X，然后重构 Y" still picks the build phase (it has task phrasing)
+	// and stays standard.
+	const phases = lower.split(TASK_SPLIT_RE).filter((task) => task.trim().length > 0);
+	const hasTaskPhrasing = (phase: string): boolean =>
+		lists.implementation.some((keyword) => phase.includes(keyword.toLowerCase())) ||
+		lists.implementationWordRes.some((re) => re.test(phase)) ||
+		lists.multiStep.some((keyword) => phase.includes(keyword.toLowerCase())) ||
+		lists.multiStepWordRes.some((re) => re.test(phase));
+	const currentTask = phases.find(hasTaskPhrasing) ?? phases[0] ?? lower;
 	// Whole-word regex sources are `\b<term>\b`; strip the boundaries to get
 	// the underlying term for soft-set lookup and human-readable reasons.
 	const wordTerm = (re: RegExp) => re.source.replace(/^\\b|\\b$/g, "");
@@ -530,24 +524,33 @@ export function classifyComplexity(input: ClassifyComplexityInput): ComplexityRe
 		!repairDebug &&
 		!implementation &&
 		codeSignals.length === 0;
+	// Short general Q&A: the PROMPT is short and intent is general. Measured
+	// on the prompt, not the context estimate — a 3-word question stays
+	// trivial at 150k context; the window fit is a capability requirement the
+	// pipeline derives from context size, not a tier escalation.
 	const shortQa =
 		intent?.intent === "general" &&
-		estimatedTokens < SHORT_QA_MAX_TOKENS &&
+		estimateTokens(prompt) < SHORT_QA_MAX_TOKENS &&
 		codeSignals.length === 0 &&
 		!repairDebug &&
 		!hasImages;
 
 	// ── weighted base signals ────────────────────────────────────────────────
 	const weighted: WeightedSignal[] = [];
+	// Context size is a capability axis (which model's window fits), not a
+	// reasoning axis. A short general Q&A suppresses it entirely; otherwise
+	// epic caps at standard — multi-step phrasing (weight 5) is the only
+	// path to complex. The pipeline derives a minContextWindow requirement
+	// from epic contexts so small-window models are still excluded.
 	const size = classifyContextSize(estimatedTokens);
 	if (size === "short") {
 		weighted.push({ tier: "trivial", weight: 1, reason: `short context (<4k tokens)` });
 	} else if (size === "medium") {
-		weighted.push({ tier: "simple", weight: 1, reason: `medium context (4k–32k tokens)` });
+		if (!shortQa) weighted.push({ tier: "simple", weight: 1, reason: `medium context (4k–32k tokens)` });
 	} else if (size === "long") {
-		weighted.push({ tier: "standard", weight: 2, reason: `long context (32k–100k tokens)` });
+		if (!shortQa) weighted.push({ tier: "standard", weight: 2, reason: `long context (32k–100k tokens)` });
 	} else {
-		weighted.push({ tier: "complex", weight: 3, reason: `epic context (≥100k tokens)` });
+		if (!shortQa) weighted.push({ tier: "standard", weight: 3, reason: `epic context (≥100k tokens) → standard` });
 	}
 	if (codeSignals.length > 0) {
 		weighted.push({
@@ -613,7 +616,8 @@ export function classifyComplexity(input: ClassifyComplexityInput): ComplexityRe
 		weighted.push({
 			tier: "trivial",
 			weight: 1.5,
-			reason: `short Q&A (general intent, <${SHORT_QA_MAX_TOKENS} tokens) → trivial`,
+			reason: `short Q&A (general intent, <${SHORT_QA_MAX_TOKENS} prompt tokens) → trivial` +
+				(size !== "short" ? "; context-size signal suppressed (window enforced via capability)" : ""),
 		});
 	}
 	if (hasImages) {

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 
 import { BudgetTracker } from "../../src/core/budget-tracker";
 import { CircuitBreaker } from "../../src/core/circuit-breaker";
@@ -9,6 +9,20 @@ import { LatencyTracker } from "../../src/core/latency-tracker";
 import { ProfileRegistry } from "../../src/core/profile-registry";
 import type { RouterConfig } from "../../src/core/types";
 import { RouterRuntime, type RouterRuntimeHost, type RouterRuntimeState } from "../../src/runtime/router-runtime";
+
+// llmAdjudicationEnabled() reads process.env live per request — scrub the
+// developer shell's ambient override so it cannot flip test outcomes.
+const ADJUDICATE_ENV_KEYS = ["AUTO_ROUTER_LLM_ADJUDICATE", "OMP_AUTO_ROUTER_LLM_ADJUDICATE", "PI_AUTO_ROUTER_LLM_ADJUDICATE"] as const;
+const ambientAdjudicateEnv = ADJUDICATE_ENV_KEYS.map((key) => [key, process.env[key]] as const);
+beforeEach(() => {
+	for (const key of ADJUDICATE_ENV_KEYS) delete process.env[key];
+});
+afterAll(() => {
+	for (const [key, value] of ambientAdjudicateEnv) {
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
+});
 
 const config: RouterConfig = {
 	active: "default",
@@ -106,6 +120,26 @@ describe("RouterRuntime", () => {
 		expect(state.lastDecision?.decision).toMatchObject({ profile: "alternate", target: { provider: "alternate", model: "three" } });
 	});
 
+	test("@profile alias override resolves through the registry", async () => {
+		const aliasConfig: RouterConfig = { ...config, aliases: { alt: ["alternate"] } };
+		const state = { ...createState(), registry: new ProfileRegistry(aliasConfig) };
+		const runtime = new RouterRuntime(state, createHost([{ type: "done", message: {} }]));
+
+		for await (const _event of runtime.stream(request("@profile:alt plain prompt"))) { /* drain */ }
+
+		expect(state.lastDecision?.decision).toMatchObject({ profile: "alternate", target: { provider: "alternate", model: "three" } });
+	});
+
+	test("unknown @profile override stays on the session profile instead of throwing", async () => {
+		const state = createState();
+		const runtime = new RouterRuntime(state, createHost([{ type: "done", message: {} }]));
+
+		for await (const _event of runtime.stream(request("@profile:nope plain prompt"))) { /* drain */ }
+
+		expect(state.lastDecision?.decision.profile).toBe("default");
+		expect(state.lastDecision?.decision.reasoning.join("\n")).toContain("@profile:nope unknown");
+	});
+
 	test("fails over before substantive output and cools only the failed target", async () => {
 		const state = createState();
 		let calls = 0;
@@ -126,6 +160,22 @@ describe("RouterRuntime", () => {
 		expect(state.circuit.state("first/one", Date.now())).toBe("closed");
 		expect(state.sessionUsage.calls.get("second/two")).toBe(1);
 	});
+
+	test("repeated partial-output failures accumulate in the circuit breaker", async () => {
+		const state = createState();
+		const runtime = new RouterRuntime(state, createHost([
+			{ type: "text_delta", delta: "partial" },
+			{ type: "error", status: 500, message: "upstream failed" },
+		]));
+		for (let attempt = 0; attempt < 3; attempt++) {
+			for await (const _event of runtime.stream(request("plain prompt"))) { /* drain */ }
+			// Cooldown suppresses immediate retries, but must not erase failure history.
+			state.cooldowns.clear();
+		}
+		expect(state.circuit.state("first/one", 1_700_000_000_000)).toBe("open");
+		expect(state.sessionUsage.calls.get("first/one")).toBeUndefined();
+	});
+
 
 	test("mixed-phase prompts are adjudicated through the host hook, fail open", async () => {
 		const state = createState();
@@ -203,5 +253,53 @@ describe("RouterRuntime", () => {
 			if (prior === undefined) delete process.env.AUTO_ROUTER_LLM_ADJUDICATE;
 			else process.env.AUTO_ROUTER_LLM_ADJUDICATE = prior;
 		}
+	});
+});
+
+describe("RouterRuntime role routing", () => {
+	function roleRequest(prompt: string, role: string) {
+		return { ...request(prompt), role };
+	}
+
+	test("non-default roles skip LLM adjudication even for mixed-phase prompts", async () => {
+		const state = createState();
+		const host = createHost([{ type: "done", message: {} }]);
+		let adjudications = 0;
+		host.adjudicate = async () => {
+			adjudications++;
+			return { tier: "complex", model: "first/one" };
+		};
+		const runtime = new RouterRuntime(state, host);
+		for await (const _event of runtime.stream(roleRequest("按照设计方案实现登录功能模块", "task"))) { /* drain */ }
+
+		expect(adjudications).toBe(0);
+		expect(state.lastDecision?.decision.role).toBe("task");
+	});
+
+	test("fixed-chain role streams its own targets, not the tier chain", async () => {
+		const roleConfig = structuredClone(config);
+		roleConfig.profiles.default!.roles = {
+			task: { targets: [{ provider: "third", model: "fixed" }] },
+		};
+		const state = { ...createState(), registry: new ProfileRegistry(roleConfig) };
+		const runtime = new RouterRuntime(state, createHost([{ type: "done", message: {} }]));
+
+		const received: string[] = [];
+		for await (const event of runtime.stream(roleRequest("重构整个模块并迁移所有调用方", "task"))) received.push(event.type);
+
+		expect(received).toEqual(["done"]);
+		expect(state.lastDecision?.decision.target).toEqual({ provider: "third", model: "fixed" });
+		expect(state.sessionUsage.calls.get("third/fixed")).toBe(1);
+	});
+
+	test("status line shows the role for non-default roles", async () => {
+		const state = createState();
+		const host = createHost([{ type: "done", message: {} }]);
+		const statuses: string[] = [];
+		host.setStatus = (text) => { statuses.push(text); };
+		const runtime = new RouterRuntime(state, host);
+		for await (const _event of runtime.stream(roleRequest("plain prompt", "task"))) { /* drain */ }
+
+		expect(statuses[0]).toContain("default/task");
 	});
 });

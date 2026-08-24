@@ -1,5 +1,5 @@
 /**
- * Narrow adapter from Pi's documented public types to the Mode A seam.
+ * Narrow adapter from Pi's documented public types to the delegation seam.
  *
  * This is deliberately the only place that knows Pi's concrete public types.
  * It does not import from a dist/internal path or inspect ModelRegistry state.

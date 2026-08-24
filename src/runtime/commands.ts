@@ -9,7 +9,8 @@
  * pretending to be unused quota.
  */
 
-import type { QuotaSnapshot, QuotaWindow, RouteTarget } from "../core/types";
+import { formatComplexityTier } from "../core/types";
+import type { ComplexityTier, QuotaSnapshot, QuotaWindow } from "../core/types";
 import {
 	baseClassifierList,
 	CLASSIFIER_LIST_META,
@@ -18,6 +19,7 @@ import {
 	type ClassifierListName,
 	type ClassifierOverrides,
 } from "../core/complexity-classifier";
+import { DEFAULT_ROLE } from "../core/profile-registry";
 import type { RouterRuntimeState } from "./router-runtime";
 import { quotaRefreshMs } from "./env";
 import {
@@ -26,6 +28,7 @@ import {
 	resolveBalanceEndpoint,
 	type ProviderBalance,
 } from "./provider-dictionary";
+import { configuredTargets } from "./adapter-kit";
 
 /** Dropdown row for argument completion; both hosts consume this shape. */
 export interface RouterCompletionItem {
@@ -46,7 +49,7 @@ export interface RouterCommandHost {
 	/** Display name of the active host ("OMP" | "Pi") for the doctor header. */
 	hostName: string;
 	notify(message: string, level: NotifyLevel): void;
-	/** Virtual profile the host's current model routes through, if any. */
+	/** Raw virtual model id the host's current model routes through, if any (may carry a `/<role>` segment). */
 	activeVirtualProfile(): string | undefined;
 	/** Switch the session model to the registered virtual profile model. */
 	setVirtualProfile(name: string): Promise<boolean>;
@@ -64,21 +67,6 @@ export interface RouterCommandHost {
 	fetchBalance?(provider: string, endpoint: string): Promise<ProviderBalance | undefined>;
 	/** Persist classifier keyword overrides after a rules edit. */
 	persistClassifierOverrides(): void;
-}
-
-/** Collect every target configured across every profile (all tiers). */
-function getConfiguredTargets(state: RouterRuntimeState): RouteTarget[] {
-	const targets: RouteTarget[] = [];
-	for (const entry of state.registry.list()) {
-		const profile = state.registry.profile(entry.name);
-		if (!profile) continue;
-		for (const tier of Object.values(profile.tiers)) {
-			for (const target of tier.targets ?? []) {
-				if (target.provider) targets.push(target);
-			}
-		}
-	}
-	return targets;
 }
 
 /** Format milliseconds until reset into a human-readable string. */
@@ -193,62 +181,415 @@ export function formatQuotaTable(
 	];
 }
 
-interface SubcommandHelp {
+export interface SubcommandDef {
 	sub: string;
 	usage: string;
 	description: string;
 	example: string;
+	/** Extra accepted spellings (e.g. the historical "useage" typo). */
+	aliases?: string[];
+	/** Second-level action completions, one level below the subcommand. */
+	actions?: Array<{ action: string; usage: string; description: string }>;
+	run(arg: string, state: RouterRuntimeState, host: RouterCommandHost): Promise<void> | void;
 }
 
-/** One entry per implemented subcommand — keep in sync with the switch below. */
-export const SUBCOMMANDS: SubcommandHelp[] = [
-	{ sub: "status", usage: "", description: "当前 profile + 最近决策 + 运行模式", example: "/auto-router status" },
-	{ sub: "profiles", usage: "", description: "列出全部 profile，▶ 为激活", example: "/auto-router profiles" },
-	{ sub: "current", usage: "", description: "打印当前 profile 名", example: "/auto-router current" },
-	{ sub: "use", usage: "<profile|alias>", description: "切换 profile（会话级持久化，resume/branch 保留）", example: "/auto-router use economy" },
-	{ sub: "list", usage: "", description: "当前 profile 各 tier 的候选链", example: "/auto-router list" },
-	{ sub: "show", usage: "[profile]", description: "profile 详情（tier 链 + 预算）", example: "/auto-router show premium" },
-	{ sub: "explain", usage: "", description: "上次路由决策的完整推理链", example: "/auto-router explain" },
-	{ sub: "doctor", usage: "", description: "宿主能力探测 + 配置错误与降级", example: "/auto-router doctor" },
-	{ sub: "reload", usage: "", description: "重读 auto-router.yml 配置", example: "/auto-router reload" },
-	{ sub: "budget", usage: "show|set <p> <usd> [monthly]|clear <p>", description: "per-provider 预算管理（80% 警告 / 100% 阻断）", example: "/auto-router budget set google 20 monthly" },
-	{ sub: "uvi", usage: "show|enable|disable|refresh", description: "UVI 配额配速监控（宿主不支持时显式降级）", example: "/auto-router uvi show" },
-	{ sub: "shadow", usage: "show|enable|disable", description: "影子模式（照记决策、按配置顺序路由）", example: "/auto-router shadow enable" },
-	{ sub: "rate", usage: "good|bad [comment]", description: "给上次决策打分（持久化，驱动反馈闭环）", example: "/auto-router rate good" },
-	{ sub: "rules", usage: "[show]|add|remove <list> <词…>|reset", description: "查看/编辑复杂度判定规则（trivial/simple/standard/complex）", example: "/auto-router rules add mechanicalOp 同步数据" },
-	{ sub: "usage", usage: "[page]", description: "本会话 settled 调用统计 + provider 接口余量（旧名 useage 仍可用）", example: "/auto-router usage 2" },
-	{ sub: "help", usage: "", description: "本帮助", example: "/auto-router help" },
+/**
+ * The command table — single source for help text, argument completions and
+ * dispatch. One entry per implemented subcommand; help, completion and
+ * `runRouterCommand` all derive from it, so nothing can drift out of sync.
+ */
+export const SUBCOMMANDS: SubcommandDef[] = [
+	{
+		sub: "status",
+		usage: "",
+		description: "当前 profile + 最近决策",
+		example: "/auto-router status",
+		run(_arg, state, host) {
+			const activeName = activeProfileName(state, host);
+			const active = { name: activeName, profile: state.registry.profile(activeName)! };
+			const last = state.lastDecision;
+			host.notify(
+				lines([
+					`profile: ${active.name}${active.profile.description ? ` (${active.profile.description})` : ""}`,
+					last
+						? `last: ${formatComplexityTier(last.decision.tier)} → ${last.decision.target.provider}/${last.decision.target.model}${last.decision.thinking !== undefined ? ` (thinking=${last.decision.thinking})` : ""} (${new Date(last.at).toLocaleTimeString()})`
+						: "last: —",
+				]),
+				"info",
+			);
+		},
+	},
+	{
+		sub: "profiles",
+		usage: "",
+		description: "列出全部 profile，▶ 为激活",
+		example: "/auto-router profiles",
+		run(_arg, state, host) {
+			const activeName = activeProfileName(state, host);
+			host.notify(
+				lines(
+					state.registry
+						.list()
+						.map((p) => `${p.name === activeName ? "▶" : " "} ${p.name}${p.description ? ` — ${p.description}` : ""}`),
+				),
+				"info",
+			);
+		},
+	},
+	{
+		sub: "current",
+		usage: "",
+		description: "打印当前 profile 名",
+		example: "/auto-router current",
+		run(_arg, state, host) {
+			host.notify(activeProfileName(state, host), "info");
+		},
+	},
+	{
+		sub: "use",
+		usage: "<profile|alias>",
+		description: "切换 profile（会话级持久化，resume/branch 保留）",
+		example: "/auto-router use economy",
+		async run(arg, state, host) {
+			if (!arg) {
+				host.notify("usage: /auto-router use <profile|alias>", "warning");
+				return;
+			}
+			const name = state.registry.resolveAlias(arg) ?? arg;
+			if (!state.registry.profile(name)) {
+				host.notify(`unknown profile: ${arg}`, "error");
+				return;
+			}
+			// Profile = virtual model: switch the session model to auto-router/<name>.
+			const ok = await host.setVirtualProfile(name);
+			if (!ok) {
+				host.notify(`model switch to auto-router/${name} failed`, "error");
+				return;
+			}
+			state.registry.switch(name);
+			host.appendProfileSwitch(name);
+			state.eventLog.append({ type: "profile-switch", at: Date.now(), profile: name });
+			host.notify(`switched to profile: ${name}`, "info");
+		},
+	},
+	{
+		sub: "list",
+		usage: "",
+		description: "当前 profile 各 tier 的候选链",
+		example: "/auto-router list",
+		run(_arg, state, host) {
+			const profile = state.registry.profile(activeProfileName(state, host))!;
+			const rows: string[] = [];
+			for (const [tier, tierCfg] of Object.entries(profile.tiers)) {
+				const targets = tierCfg.targets
+					.map((t) => `${t.provider}/${t.model}`)
+					.join(", ");
+				rows.push(`${formatComplexityTier(tier as ComplexityTier)} (thinking=${tierCfg.thinking ?? "—"}): ${targets}`);
+			}
+			host.notify(lines(rows), "info");
+		},
+	},
+	{
+		sub: "show",
+		usage: "[profile]",
+		description: "profile 详情（tier 链 + 预算）",
+		example: "/auto-router show premium",
+		run(arg, state, host) {
+			const target = arg || activeProfileName(state, host);
+			const profile = state.registry.profile(target);
+			if (!profile) {
+				host.notify(`unknown profile: ${target}`, "error");
+				return;
+			}
+			host.notify(
+				lines([
+					`${target}${profile.description ? ` — ${profile.description}` : ""}`,
+					`defaultTier: ${formatComplexityTier(profile.defaultTier ?? "standard")}`,
+					...Object.entries(profile.tiers).flatMap(([tier, tierCfg]) => [
+						`${formatComplexityTier(tier as ComplexityTier)} (thinking=${tierCfg.thinking ?? "—"}):`,
+						...tierCfg.targets.map((t) => `  - ${t.provider}/${t.model}${t.billing === "per-token" ? " (per-token)" : ""}`),
+					]),
+					...(profile.budgets
+						? ["budgets:", ...Object.entries(profile.budgets).map(([p, b]) => `  - ${p}: $${b.amount}${b.monthly ? " monthly" : " daily"}`)]
+						: []),
+				]),
+				"info",
+			);
+		},
+	},
+	{
+		sub: "explain",
+		usage: "",
+		description: "上次路由决策的完整推理链",
+		example: "/auto-router explain",
+		run(_arg, state, host) {
+			const last = state.lastDecision;
+			if (!last) {
+				host.notify("no routing decision yet", "info");
+				return;
+			}
+			host.notify(
+				lines([
+					`profile=${last.decision.profile} role=${last.decision.role ?? DEFAULT_ROLE} tier=${formatComplexityTier(last.decision.tier)} (conf ${last.decision.confidence.toFixed(2)})`,
+					`target: ${last.decision.target.provider}/${last.decision.target.model}`,
+					`chain: ${last.decision.orderedCandidates.map((t) => `${t.provider}/${t.model}`).join(" → ")}`,
+					`tokens≈${last.decision.estimatedTokens}`,
+					...last.decision.orderedCandidates.map((t) => {
+						const stats = state.ratings.statsFor(t.provider, t.model);
+						return stats.total > 0
+							? `ratings ${t.provider}/${t.model}: ${stats.good}👍/${stats.bad}👎 (${(stats.goodFraction * 100).toFixed(0)}% good)`
+							: `ratings ${t.provider}/${t.model}: none yet`;
+					}),
+					...last.decision.reasoning.map((r) => `· ${r}`),
+				]),
+				"info",
+			);
+		},
+	},
+	{
+		sub: "doctor",
+		usage: "",
+		description: "宿主能力探测 + 配置错误与降级",
+		example: "/auto-router doctor",
+		run(_arg, state, host) {
+			host.notify(
+				lines([
+					`auto-router doctor${host.hostName === "OMP" ? "" : ` (${host.hostName})`}`,
+					...(state.configErrors && state.configErrors.length > 0 ? [`config errors: ${state.configErrors.join("; ")}`] : []),
+					...host.doctorLines(),
+				]),
+				"info",
+			);
+		},
+	},
+	{
+		sub: "reload",
+		usage: "",
+		description: "重读 auto-router.yml 配置",
+		example: "/auto-router reload",
+		async run(_arg, state, host) {
+			const errors = await host.reloadConfig();
+			host.notify(
+				lines(["config reloaded", ...(errors.length > 0 ? [`warnings: ${errors.join("; ")}`] : [])]),
+				errors.length > 0 ? "warning" : "info",
+			);
+		},
+	},
+	{
+		sub: "budget",
+		usage: "show|set <p> <usd> [monthly]|clear <p>",
+		description: "per-provider 预算管理（80% 警告 / 100% 阻断）",
+		example: "/auto-router budget set google 20 monthly",
+		actions: [
+			{ action: "show", usage: "", description: "查看预算使用" },
+			{ action: "set", usage: "<provider> <usd> [monthly]", description: "设置预算上限" },
+			{ action: "clear", usage: "<provider> [monthly]", description: "清除预算上限" },
+		],
+		run(arg, state, host) {
+			const [action, provider, amount, period] = arg.trim().split(/\s+/);
+			if (action === "show" || action === undefined) {
+				const limits = state.budgets.limits();
+				const rows = Object.entries(limits).map(([p, limit]) => {
+					const usage = state.budgets.usage(p, new Date());
+					const spent = (limit.monthly ? usage.monthly?.cost : usage.daily?.cost) ?? 0;
+					const pct = limit.amount > 0 ? ((spent / limit.amount) * 100).toFixed(0) : "0";
+					return `${p}: $${spent.toFixed(2)} / $${limit.amount} (${pct}%) ${limit.monthly ? "monthly" : "daily"}`;
+				});
+				host.notify(lines(rows.length > 0 ? rows : ["no budgets configured — /auto-router budget set <provider> <amount> [monthly]"]), "info");
+				return;
+			}
+			if (action === "set") {
+				if (!provider || !amount || !/^\d+(\.\d+)?$/.test(amount)) {
+					host.notify("usage: /auto-router budget set <provider> <usd> [monthly]", "warning");
+					return;
+				}
+				state.budgets.setLimit(provider, { amount: Number(amount), monthly: period === "monthly" });
+				host.notify(`budget set: ${provider} $${amount}${period === "monthly" ? " monthly" : " daily"}`, "info");
+				return;
+			}
+			if (action === "clear") {
+				if (!provider) {
+					host.notify("usage: /auto-router budget clear <provider> [monthly]", "warning");
+					return;
+				}
+				state.budgets.clearLimit(provider, period === "monthly" ? true : undefined);
+				host.notify(`budget cleared: ${provider}`, "info");
+				return;
+			}
+			host.notify("unknown budget action — show | set <p> <usd> [monthly] | clear <p> [monthly]", "warning");
+		},
+	},
+	{
+		sub: "uvi",
+		usage: "show|enable|disable|refresh",
+		description: "UVI 配额配速监控（宿主不支持时显式降级）",
+		example: "/auto-router uvi show",
+		actions: [
+			{ action: "show", usage: "", description: "UVI 配额配速状态" },
+			{ action: "enable", usage: "", description: "开启 UVI 监控" },
+			{ action: "disable", usage: "", description: "关闭 UVI 监控" },
+			{ action: "refresh", usage: "", description: "清空配额缓存" },
+		],
+		run(arg, state, host) {
+			const [action] = arg.trim().split(/\s+/);
+			if (!host.quotaAvailable()) {
+				host.notify(uviUnavailableNotice(host.hostName), "warning");
+				return;
+			}
+			if (action === "disable") {
+				state.uviEnabled = false;
+				host.notify("UVI monitoring disabled", "info");
+				return;
+			}
+			if (action === "enable") {
+				state.uviEnabled = true;
+				host.notify("UVI monitoring enabled", "info");
+				return;
+			}
+			if (action === "refresh") {
+				state.quotaCache = { at: 0, data: [] };
+				host.notify("quota cache cleared — next request refetches", "info");
+				return;
+			}
+			const last = state.lastDecision;
+			const rows = last
+				? Object.entries((last.decision.hints?.uvi ?? {}) as Record<string, { uvi: number; status: string }>).map(
+						([provider, r]) => `${provider}: UVI=${r.uvi.toFixed(2)} ${r.status}`,
+					)
+				: [];
+			host.notify(
+				lines([
+					`UVI ${state.uviEnabled ? "enabled" : "disabled"}`,
+					...(rows.length > 0 ? rows : ["no quota data yet — run a request first"]),
+				]),
+				"info",
+			);
+		},
+	},
+	{
+		sub: "shadow",
+		usage: "show|enable|disable",
+		description: "影子模式（照记决策、按配置顺序路由）",
+		example: "/auto-router shadow enable",
+		actions: [
+			{ action: "show", usage: "", description: "影子模式状态" },
+			{ action: "enable", usage: "", description: "开启影子模式" },
+			{ action: "disable", usage: "", description: "关闭影子模式" },
+		],
+		run(arg, state, host) {
+			const [action] = arg.trim().split(/\s+/);
+			if (action === "enable") {
+				state.shadowEnabled = true;
+				host.notify("shadow mode enabled — routing in config order, decisions logged", "info");
+				return;
+			}
+			if (action === "disable") {
+				state.shadowEnabled = false;
+				host.notify("shadow mode disabled", "info");
+				return;
+			}
+			host.notify(`shadow mode: ${state.shadowEnabled ? "🟢 enabled" : "off"}`, "info");
+		},
+	},
+	{
+		sub: "rate",
+		usage: "good|bad [comment]",
+		description: "给上次决策打分（持久化，驱动反馈闭环）",
+		example: "/auto-router rate good",
+		actions: [
+			{ action: "good", usage: "[comment]", description: "好评上次决策" },
+			{ action: "bad", usage: "[comment]", description: "差评上次决策" },
+		],
+		run(arg, state, host) {
+			const [rating, ...commentParts] = arg.trim().split(/\s+/);
+			if (rating !== "good" && rating !== "bad") {
+				host.notify("usage: /auto-router rate good|bad [comment]", "warning");
+				return;
+			}
+			const last = state.lastDecision;
+			if (!last) {
+				host.notify("no decision to rate yet", "warning");
+				return;
+			}
+			state.ratings.rate({
+				rating,
+				...(commentParts.length > 0 ? { comment: commentParts.join(" ") } : {}),
+				provider: last.decision.target.provider,
+				model: last.decision.target.model,
+				profile: last.decision.profile,
+				tier: last.decision.tier,
+			});
+			const stats = state.ratings.statsFor(last.decision.target.provider, last.decision.target.model);
+			host.notify(
+				`rated ${rating} — ${last.decision.target.provider}/${last.decision.target.model} (${stats.total} total, ${Math.round(stats.goodFraction * 100)}% good)`,
+				"info",
+			);
+		},
+	},
+	{
+		sub: "rules",
+		usage: "[show]|add|remove <list> <词…>|reset",
+		description: "查看/编辑复杂度判定规则（问答/轻任务/常规开发/深度工程）",
+		example: "/auto-router rules add mechanicalOp 同步数据",
+		actions: [
+			{ action: "show", usage: "", description: "查看全部判定规则" },
+			{ action: "add", usage: "<list> <关键词…>", description: "向指定列表添加关键词" },
+			{ action: "remove", usage: "<list> <关键词…>", description: "从指定列表移除关键词（含内置）" },
+			{ action: "reset", usage: "", description: "清空全部自定义覆盖，还原内置" },
+		],
+		run(arg, state, host) {
+			const [action = "", ...ruleArgs] = arg.trim().split(/\s+/).filter((s) => s.length > 0);
+			if (action === "" || action === "show") {
+				host.notify(formatClassifierRules(state.classifierOverrides), "info");
+				return;
+			}
+			if (action === "reset") {
+				state.classifierOverrides = {};
+				host.persistClassifierOverrides();
+				host.notify("classifier rules reset — 已还原为内置判定规则", "info");
+				return;
+			}
+			if (action === "add" || action === "remove") {
+				const [listName, ...keywords] = ruleArgs;
+				if (!listName || keywords.length === 0 || !(CLASSIFIER_LIST_NAMES as readonly string[]).includes(listName)) {
+					host.notify(
+						`usage: /auto-router rules ${action} <${CLASSIFIER_LIST_NAMES.join("|")}> <关键词…>`,
+						"warning",
+					);
+					return;
+				}
+				const { changed, skipped } = applyRulesEdit(state, action, listName as ClassifierListName, keywords);
+				host.persistClassifierOverrides();
+				host.notify(
+					lines([
+						changed.length > 0 ? `${action === "add" ? "added" : "removed"} → ${listName}: ${changed.join(", ")}（已持久化，下一请求生效）` : undefined,
+						skipped.length > 0 ? `skipped (无变化): ${skipped.join(", ")}` : undefined,
+					]),
+					changed.length > 0 ? "info" : "warning",
+				);
+				return;
+			}
+			host.notify(`unknown rules action: ${action} — show|add|remove|reset`, "warning");
+		},
+	},
+	{
+		sub: "usage",
+		usage: "[page]",
+		description: "本会话 settled 调用统计 + provider 接口余量（旧名 useage 仍可用）",
+		example: "/auto-router usage 2",
+		aliases: ["useage"],
+		run: (arg, state, host) => runUsage(arg, state, host),
+	},
+	{
+		sub: "help",
+		usage: "",
+		description: "本帮助",
+		example: "/auto-router help",
+		run(_arg, _state, host) {
+			host.notify(runHelp(), "info");
+		},
+	},
 ];
-
-/** Second-level action completions per subcommand — sync with the switch below. */
-const SUBCOMMAND_ACTIONS: Record<string, Array<{ action: string; usage: string; description: string }>> = {
-	budget: [
-		{ action: "show", usage: "", description: "查看预算使用" },
-		{ action: "set", usage: "<provider> <usd> [monthly]", description: "设置预算上限" },
-		{ action: "clear", usage: "<provider> [monthly]", description: "清除预算上限" },
-	],
-	uvi: [
-		{ action: "show", usage: "", description: "UVI 配额配速状态" },
-		{ action: "enable", usage: "", description: "开启 UVI 监控" },
-		{ action: "disable", usage: "", description: "关闭 UVI 监控" },
-		{ action: "refresh", usage: "", description: "清空配额缓存" },
-	],
-	shadow: [
-		{ action: "show", usage: "", description: "影子模式状态" },
-		{ action: "enable", usage: "", description: "开启影子模式" },
-		{ action: "disable", usage: "", description: "关闭影子模式" },
-	],
-	rate: [
-		{ action: "good", usage: "[comment]", description: "好评上次决策" },
-		{ action: "bad", usage: "[comment]", description: "差评上次决策" },
-	],
-	rules: [
-		{ action: "show", usage: "", description: "查看全部判定规则" },
-		{ action: "add", usage: "<list> <关键词…>", description: "向指定列表添加关键词" },
-		{ action: "remove", usage: "<list> <关键词…>", description: "从指定列表移除关键词（含内置）" },
-		{ action: "reset", usage: "", description: "清空全部自定义覆盖，还原内置" },
-	],
-};
 
 /**
  * Dropdown completions for the text after `/auto-router `. Mirrors the
@@ -310,7 +651,7 @@ function buildNestedCompletions(sub: string, rest: string, state: RouterRuntimeS
 		return items.length > 0 ? items : null;
 	}
 
-	const actions = SUBCOMMAND_ACTIONS[sub];
+	const actions = SUBCOMMANDS.find((s) => s.sub === sub)?.actions;
 	if (!actions) return null;
 	const items = actions
 		.filter((a) => a.action.startsWith(token.toLowerCase()))
@@ -343,7 +684,12 @@ function runHelp(): string {
  */
 function activeProfileName(state: RouterRuntimeState, host: RouterCommandHost): string {
 	const virtual = host.activeVirtualProfile();
-	if (virtual !== undefined && state.registry.profile(virtual) !== undefined) return virtual;
+	if (virtual !== undefined) {
+		// The host reports the raw virtual model id, which may carry a role
+		// segment (`<profile>/<role>`) — reduce it to its profile.
+		const { profile } = state.registry.parseVirtualModelId(virtual);
+		if (state.registry.profile(profile) !== undefined) return profile;
+	}
 	return state.registry.current();
 }
 
@@ -353,23 +699,23 @@ function activeProfileName(state: RouterRuntimeState, host: RouterCommandHost): 
  * removals hidden and counted) plus the fixed structural signals.
  */
 export function formatClassifierRules(overrides: ClassifierOverrides | undefined): string {
-	const out: string[] = ["复杂度判定规则（trivial < simple < standard < complex，权重高者胜，平局取更高 tier）", ""];
+	const out: string[] = ["复杂度判定规则（问答 < 轻任务 < 常规开发 < 深度工程；权重高者胜，平局取更高层）", ""];
 	for (const name of CLASSIFIER_LIST_NAMES) {
 		const meta = CLASSIFIER_LIST_META[name];
 		const removed = new Set((overrides?.remove?.[name] ?? []).map((k) => k.toLowerCase()));
 		const builtin = baseClassifierList(name).filter((k) => !removed.has(k.toLowerCase()));
 		const added = overrides?.add?.[name] ?? [];
-		out.push(`→ ${meta.tier}  ${name}  [${meta.match}, 权重 ${meta.weight}] ${meta.description}`);
+		out.push(`→ ${formatComplexityTier(meta.tier)}  ${name}  [${meta.match}, 权重 ${meta.weight}] ${meta.description}`);
 		out.push(`  ${[...builtin, ...added.map((k) => `${k} (+)`)].join(", ")}`);
 	}
 	out.push(
 		"",
 		"内置信号（不可编辑）:",
-		"  context 大小: <4k→trivial(w1) · 4k–32k→simple(w1) · 32k–100k→standard(w2) · ≥100k→complex(w3)",
-		"  code signals（文件路径/diff/stack-trace）→standard(w2) · code/analysis intent→standard(w1.5)",
-		"  拆分分析：按 并/然后/接着/再/and/then/句末标点 拆阶段，首阶段定层——设计并实现 X→complex（先设计），实现 X 然后设计 Y→standard（先实现），后续阶段轮到各自请求时再判；硬词（重构/迁移/架构/跨文件、refactor/migrate）只在首阶段内计数",
-		"  short Q&A（general intent, <200 tokens）→trivial(w1.5) · 图片输入→至少 simple(w1)",
-		"  sticky escalation: 会话内只升不降 · 钉层: @fast→simple @swe→standard @reasoning→complex",
+		"  context 大小: <4k→问答 · 4k–32k→轻任务 · 32k–100k→常规开发 · ≥100k→深度工程",
+		"  code signals（文件路径/diff/stack-trace）→常规开发 · code/analysis intent→常规开发",
+		"  拆分分析：按 并/然后/接着/再/and/then/句末标点 拆阶段，首阶段定层——设计并实现 X→深度工程（先设计），实现 X 然后设计 Y→常规开发（先实现）；硬词（重构/迁移/架构/跨文件、refactor/migrate）只在首阶段内计数",
+		"  short Q&A（general intent, <200 tokens）→问答 · 图片输入→至少轻任务",
+		"  sticky escalation: 会话内只升不降 · 钉层: @fast→轻任务 @swe→常规开发 @reasoning→深度工程",
 	);
 	if (overrides && !overridesEmpty(overrides)) {
 		const count = (m?: Partial<Record<ClassifierListName, string[]>>) =>
@@ -454,7 +800,7 @@ async function runUsage(arg: string, state: RouterRuntimeState, host: RouterComm
 		providerCost.set(provider, (providerCost.get(provider) ?? 0) + cost);
 	}
 
-	const targets = getConfiguredTargets(state);
+	const targets = configuredTargets(state.registry);
 	const providers = [...new Set(targets.map((target) => target.provider))].sort();
 	const cache = state.quotaCache ?? { at: 0, data: [] };
 	const refreshQuota = host.fetchQuota !== undefined && providers.length > 0 && (cache.data.length === 0 || Date.now() - cache.at > quotaRefreshMs());
@@ -511,304 +857,16 @@ async function runUsage(arg: string, state: RouterRuntimeState, host: RouterComm
 /**
  * Execute one `/auto-router` invocation against the shared behavior. Host
  * differences (model switching, reload, quota capability, authenticated
- * fetch) arrive through `host`; routing state lives in `state`.
+ * fetch) arrive through `host`; routing state lives in `state`. Dispatch is
+ * a lookup into the SUBCOMMANDS table (empty input maps to `status`).
  */
 export async function runRouterCommand(rawArgs: string, state: RouterRuntimeState, host: RouterCommandHost): Promise<void> {
-	const [sub, ...rest] = rawArgs.trim().split(/\s+/);
+	const [sub = "", ...rest] = rawArgs.trim().split(/\s+/);
 	const arg = rest.join(" ");
-
-	switch (sub ?? "") {
-		case "":
-		case "status": {
-			const activeName = activeProfileName(state, host);
-			const active = { name: activeName, profile: state.registry.profile(activeName)! };
-			const last = state.lastDecision;
-			host.notify(
-				lines([
-					`profile: ${active.name}${active.profile.description ? ` (${active.profile.description})` : ""}`,
-					last
-						? `last: ${last.decision.tier} → ${last.decision.target.provider}/${last.decision.target.model}${last.decision.thinking !== undefined ? ` (thinking=${last.decision.thinking})` : ""} (${new Date(last.at).toLocaleTimeString()})`
-						: "last: —",
-					`mode: A (stream delegation)`,
-				]),
-				"info",
-			);
-			return;
-		}
-		case "profiles": {
-			const activeName = activeProfileName(state, host);
-			host.notify(
-				lines(
-					state.registry
-						.list()
-						.map((p) => `${p.name === activeName ? "▶" : " "} ${p.name}${p.description ? ` — ${p.description}` : ""}`),
-				),
-				"info",
-			);
-			return;
-		}
-		case "current": {
-			host.notify(activeProfileName(state, host), "info");
-			return;
-		}
-		case "use": {
-			if (!arg) {
-				host.notify("usage: /auto-router use <profile|alias>", "warning");
-				return;
-			}
-			const name = state.registry.resolveAlias(arg) ?? arg;
-			if (!state.registry.profile(name)) {
-				host.notify(`unknown profile: ${arg}`, "error");
-				return;
-			}
-			// Profile = virtual model: switch the session model to auto-router/<name>.
-			const ok = await host.setVirtualProfile(name);
-			if (!ok) {
-				host.notify(`model switch to auto-router/${name} failed`, "error");
-				return;
-			}
-			state.registry.switch(name);
-			host.appendProfileSwitch(name);
-			state.eventLog.append({ type: "profile-switch", at: Date.now(), profile: name });
-			host.notify(`switched to profile: ${name}`, "info");
-			return;
-		}
-		case "list": {
-			const profile = state.registry.profile(activeProfileName(state, host))!;
-			const rows: string[] = [];
-			for (const [tier, tierCfg] of Object.entries(profile.tiers)) {
-				const targets = tierCfg.targets
-					.map((t) => `${t.provider}/${t.model}`)
-					.join(", ");
-				rows.push(`${tier} (thinking=${tierCfg.thinking ?? "—"}): ${targets}`);
-			}
-			host.notify(lines(rows), "info");
-			return;
-		}
-		case "show": {
-			const target = arg || activeProfileName(state, host);
-			const profile = state.registry.profile(target);
-			if (!profile) {
-				host.notify(`unknown profile: ${target}`, "error");
-				return;
-			}
-			host.notify(
-				lines([
-					`${target}${profile.description ? ` — ${profile.description}` : ""}`,
-					`defaultTier: ${profile.defaultTier ?? "standard"}`,
-					...Object.entries(profile.tiers).flatMap(([tier, tierCfg]) => [
-						`${tier} (thinking=${tierCfg.thinking ?? "—"}):`,
-						...tierCfg.targets.map((t) => `  - ${t.provider}/${t.model}${t.billing === "per-token" ? " (per-token)" : ""}`),
-					]),
-					...(profile.budgets
-						? ["budgets:", ...Object.entries(profile.budgets).map(([p, b]) => `  - ${p}: $${b.amount}${b.monthly ? " monthly" : " daily"}`)]
-						: []),
-				]),
-				"info",
-			);
-			return;
-		}
-		case "explain": {
-			const last = state.lastDecision;
-			if (!last) {
-				host.notify("no routing decision yet", "info");
-				return;
-			}
-			host.notify(
-				lines([
-					`profile=${last.decision.profile} tier=${last.decision.tier} (conf ${last.decision.confidence.toFixed(2)})`,
-					`target: ${last.decision.target.provider}/${last.decision.target.model}`,
-					`chain: ${last.decision.orderedCandidates.map((t) => `${t.provider}/${t.model}`).join(" → ")}`,
-					`tokens≈${last.decision.estimatedTokens}`,
-					...last.decision.orderedCandidates.map((t) => {
-						const stats = state.ratings.statsFor(t.provider, t.model);
-						return stats.total > 0
-							? `ratings ${t.provider}/${t.model}: ${stats.good}👍/${stats.bad}👎 (${(stats.goodFraction * 100).toFixed(0)}% good)`
-							: `ratings ${t.provider}/${t.model}: none yet`;
-					}),
-					...last.decision.reasoning.map((r) => `· ${r}`),
-				]),
-				"info",
-			);
-			return;
-		}
-		case "doctor": {
-			host.notify(
-				lines([
-					`auto-router doctor${host.hostName === "OMP" ? "" : ` (${host.hostName})`}`,
-					...(state.configErrors && state.configErrors.length > 0 ? [`config errors: ${state.configErrors.join("; ")}`] : []),
-					...host.doctorLines(),
-					`mode: A`,
-				]),
-				"info",
-			);
-			return;
-		}
-		case "reload": {
-			const errors = await host.reloadConfig();
-			host.notify(
-				lines(["config reloaded", ...(errors.length > 0 ? [`warnings: ${errors.join("; ")}`] : [])]),
-				errors.length > 0 ? "warning" : "info",
-			);
-			return;
-		}
-		case "budget": {
-			const [action, provider, amount, period] = arg.trim().split(/\s+/);
-			if (action === "show" || action === undefined) {
-				const limits = state.budgets.limits();
-				const rows = Object.entries(limits).map(([p, limit]) => {
-					const usage = state.budgets.usage(p, new Date());
-					const spent = (limit.monthly ? usage.monthly?.cost : usage.daily?.cost) ?? 0;
-					const pct = limit.amount > 0 ? ((spent / limit.amount) * 100).toFixed(0) : "0";
-					return `${p}: $${spent.toFixed(2)} / $${limit.amount} (${pct}%) ${limit.monthly ? "monthly" : "daily"}`;
-				});
-				host.notify(lines(rows.length > 0 ? rows : ["no budgets configured — /auto-router budget set <provider> <amount> [monthly]"]), "info");
-				return;
-			}
-			if (action === "set") {
-				if (!provider || !amount || !/^\d+(\.\d+)?$/.test(amount)) {
-					host.notify("usage: /auto-router budget set <provider> <usd> [monthly]", "warning");
-					return;
-				}
-				state.budgets.setLimit(provider, { amount: Number(amount), monthly: period === "monthly" });
-				host.notify(`budget set: ${provider} $${amount}${period === "monthly" ? " monthly" : " daily"}`, "info");
-				return;
-			}
-			if (action === "clear") {
-				if (!provider) {
-					host.notify("usage: /auto-router budget clear <provider> [monthly]", "warning");
-					return;
-				}
-				state.budgets.clearLimit(provider, period === "monthly" ? true : undefined);
-				host.notify(`budget cleared: ${provider}`, "info");
-				return;
-			}
-			host.notify("unknown budget action — show | set <p> <usd> [monthly] | clear <p> [monthly]", "warning");
-			return;
-		}
-		case "uvi": {
-			const [action] = arg.trim().split(/\s+/);
-			if (!host.quotaAvailable()) {
-				host.notify(uviUnavailableNotice(host.hostName), "warning");
-				return;
-			}
-			if (action === "disable") {
-				state.uviEnabled = false;
-				host.notify("UVI monitoring disabled", "info");
-				return;
-			}
-			if (action === "enable") {
-				state.uviEnabled = true;
-				host.notify("UVI monitoring enabled", "info");
-				return;
-			}
-			if (action === "refresh") {
-				state.quotaCache = { at: 0, data: [] };
-				host.notify("quota cache cleared — next request refetches", "info");
-				return;
-			}
-			const last = state.lastDecision;
-			const rows = last
-				? Object.entries((last.decision.hints?.uvi ?? {}) as Record<string, { uvi: number; status: string }>).map(
-						([provider, r]) => `${provider}: UVI=${r.uvi.toFixed(2)} ${r.status}`,
-					)
-				: [];
-			host.notify(
-				lines([
-					`UVI ${state.uviEnabled ? "enabled" : "disabled"}`,
-					...(rows.length > 0 ? rows : ["no quota data yet — run a request first"]),
-				]),
-				"info",
-			);
-			return;
-		}
-		case "shadow": {
-			const [action] = arg.trim().split(/\s+/);
-			if (action === "enable") {
-				state.shadowEnabled = true;
-				host.notify("shadow mode enabled — routing in config order, decisions logged", "info");
-				return;
-			}
-			if (action === "disable") {
-				state.shadowEnabled = false;
-				host.notify("shadow mode disabled", "info");
-				return;
-			}
-			host.notify(`shadow mode: ${state.shadowEnabled ? "🟢 enabled" : "off"}`, "info");
-			return;
-		}
-		case "rate": {
-			const [rating, ...commentParts] = arg.trim().split(/\s+/);
-			if (rating !== "good" && rating !== "bad") {
-				host.notify("usage: /auto-router rate good|bad [comment]", "warning");
-				return;
-			}
-			const last = state.lastDecision;
-			if (!last) {
-				host.notify("no decision to rate yet", "warning");
-				return;
-			}
-			state.ratings.rate({
-				rating,
-				...(commentParts.length > 0 ? { comment: commentParts.join(" ") } : {}),
-				provider: last.decision.target.provider,
-				model: last.decision.target.model,
-				profile: last.decision.profile,
-				tier: last.decision.tier,
-			});
-			const stats = state.ratings.statsFor(last.decision.target.provider, last.decision.target.model);
-			host.notify(
-				`rated ${rating} — ${last.decision.target.provider}/${last.decision.target.model} (${stats.total} total, ${Math.round(stats.goodFraction * 100)}% good)`,
-				"info",
-			);
-			return;
-		}
-		case "usage":
-		case "useage": {
-			await runUsage(arg, state, host);
-			return;
-		}
-		case "rules": {
-			const [action = "", ...ruleArgs] = arg.trim().split(/\s+/).filter((s) => s.length > 0);
-			if (action === "" || action === "show") {
-				host.notify(formatClassifierRules(state.classifierOverrides), "info");
-				return;
-			}
-			if (action === "reset") {
-				state.classifierOverrides = {};
-				host.persistClassifierOverrides();
-				host.notify("classifier rules reset — 已还原为内置判定规则", "info");
-				return;
-			}
-			if (action === "add" || action === "remove") {
-				const [listName, ...keywords] = ruleArgs;
-				if (!listName || keywords.length === 0 || !(CLASSIFIER_LIST_NAMES as readonly string[]).includes(listName)) {
-					host.notify(
-						`usage: /auto-router rules ${action} <${CLASSIFIER_LIST_NAMES.join("|")}> <关键词…>`,
-						"warning",
-					);
-					return;
-				}
-				const { changed, skipped } = applyRulesEdit(state, action, listName as ClassifierListName, keywords);
-				host.persistClassifierOverrides();
-				host.notify(
-					lines([
-						changed.length > 0 ? `${action === "add" ? "added" : "removed"} → ${listName}: ${changed.join(", ")}（已持久化，下一请求生效）` : undefined,
-						skipped.length > 0 ? `skipped (无变化): ${skipped.join(", ")}` : undefined,
-					]),
-					changed.length > 0 ? "info" : "warning",
-				);
-				return;
-			}
-			host.notify(`unknown rules action: ${action} — show|add|remove|reset`, "warning");
-			return;
-		}
-		case "help": {
-			host.notify(runHelp(), "info");
-			return;
-		}
-		default:
-			host.notify(`unknown subcommand: ${sub} — run /auto-router help for usage`, "warning");
-			return;
+	const def = SUBCOMMANDS.find((d) => d.sub === (sub === "" ? "status" : sub) || d.aliases?.includes(sub));
+	if (def === undefined) {
+		host.notify(`unknown subcommand: ${sub} — run /auto-router help for usage`, "warning");
+		return;
 	}
+	await def.run(arg, state, host);
 }

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
 	delegatePiTarget,
-	inspectPiModeACapabilities,
+	inspectPiDelegationCapabilities,
 	PiDelegationError,
 	type PiPublicModel,
 } from "../../src/pi-adapter/delegated-stream";
@@ -54,7 +54,7 @@ function createRegistry(overrides: Partial<Parameters<typeof delegatePiTarget>[0
 	};
 }
 
-describe("Pi public Mode A delegation seam", () => {
+describe("Pi public delegation seam", () => {
 	test("delegates text, thinking, tool calls, and terminal usage with target authentication", async () => {
 		const { registry, calls } = createRegistry();
 
@@ -121,14 +121,14 @@ describe("Pi public Mode A delegation seam", () => {
 	test("fails with an actionable error when a required public capability is absent", async () => {
 		const { registry } = createRegistry({ getProvider: undefined });
 
-		expect(inspectPiModeACapabilities(registry)).toEqual({
+		expect(inspectPiDelegationCapabilities(registry)).toEqual({
 			supported: false,
 			missing: ["getProvider"],
 		});
 		expect(delegatePiTarget(registry, target, context)).rejects.toEqual(
 			expect.objectContaining({
 			name: "PiDelegationError",
-			message: "Pi Mode A delegation requires public ModelRegistry capability: getProvider",
+			message: "Pi delegation requires public ModelRegistry capability: getProvider",
 		}),
 		);
 	});

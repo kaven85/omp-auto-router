@@ -92,12 +92,12 @@ describe("failoverStream", () => {
 		const boom = new Error("rate limit exceeded");
 		const factory: StreamFactory = (t) => {
 			if (t.provider === "a") throw boom;
-			return streamOf([{ type: "text_delta" }]);
+			return streamOf([{ type: "text_delta" }, { type: "done" }]);
 		};
 		const { hooks, failed, failovers, settled } = recordingHooks();
 
 		const out = await collect(failoverStream([a, b], factory, hooks));
-		expect(out).toEqual([{ type: "text_delta" }]);
+		expect(out).toEqual([{ type: "text_delta" }, { type: "done" }]);
 		expect(failed).toEqual([{ target: a, error: boom }]);
 		expect(failovers).toEqual([{ from: a, to: b, error: boom }]);
 		expect(settled).toEqual([b]);
@@ -115,9 +115,9 @@ describe("failoverStream", () => {
 
 		const out = await collect(failoverStream([a, b], factory, hooks));
 		expect(out).toEqual([{ type: "text_delta", text: "partial" }, lateError]);
-		expect(failed).toEqual([]); // a post-content error is not a failover failure
+		expect(failed).toEqual([{ target: a, error: lateError }]); // health failure, but no duplicate-output failover
 		expect(failovers).toEqual([]);
-		expect(settled).toEqual([a]);
+		expect(settled).toEqual([]); // partial-output failure never becomes a clean settlement
 	});
 
 	test("errors thrown mid-stream after substantive output propagate", async () => {
@@ -129,9 +129,10 @@ describe("failoverStream", () => {
 			throw boom;
 		})();
 		const factory: StreamFactory = (t) => (t.provider === "a" ? failing : streamOf([]));
-		const { hooks, failovers } = recordingHooks();
+		const { hooks, failed, failovers } = recordingHooks();
 
 		await expect(collect(failoverStream([a, b], factory, hooks))).rejects.toBe(boom);
+		expect(failed).toEqual([{ target: a, error: boom }]);
 		expect(failovers).toEqual([]);
 	});
 
@@ -280,6 +281,32 @@ describe("failoverStream", () => {
 		expect(failovers).toEqual([]);
 	});
 
+	test("abort after substantive output is not recorded as a target failure", async () => {
+		const a = target("a");
+		const abortEvent: StreamEventLike = { type: "error", reason: "aborted" };
+		const { hooks, failed } = recordingHooks();
+		const out = await collect(failoverStream(
+			[a],
+			() => streamOf([{ type: "text_delta", delta: "partial" }, abortEvent]),
+			hooks,
+		));
+		expect(out).toEqual([{ type: "text_delta", delta: "partial" }, abortEvent]);
+		expect(failed).toEqual([]);
+	});
+
+	test("AbortError thrown after substantive output is not recorded as a target failure", async () => {
+		const a = target("a");
+		const abortError = new DOMException("The operation was aborted", "AbortError");
+		const factory: StreamFactory = async function* () {
+			yield { type: "text_delta", delta: "partial" };
+			throw abortError;
+		};
+		const { hooks, failed } = recordingHooks();
+		await expect(collect(failoverStream([a], factory, hooks))).rejects.toBe(abortError);
+		expect(failed).toEqual([]);
+	});
+
+
 	test("empty candidate chain is a programmer error", async () => {
 		const factory: StreamFactory = () => streamOf([]);
 		const { hooks } = recordingHooks();
@@ -378,5 +405,52 @@ describe("formatError", () => {
 
 	test("falls back to JSON for messageless objects", () => {
 		expect(formatError({ code: "ECONNRESET" })).toBe('{"code":"ECONNRESET"}');
+	});
+
+	test("unwraps pi terminal error events via error.errorMessage", () => {
+		const event = {
+			type: "error",
+			reason: "error",
+			error: {
+				role: "assistant",
+				content: [{ type: "thinking", thinking: "Refactoring exit execution logic" }],
+				errorMessage:
+					"The socket connection was closed unexpectedly. For more information, pass verbose: true in the second argument to fetch()",
+			},
+		};
+		expect(formatError(event)).toBe(
+			"The socket connection was closed unexpectedly. For more information, pass verbose: true in the second argument to fetch()",
+		);
+	});
+});
+
+describe("defaultIsRetryable with pi terminal error events", () => {
+	const socketEvent = {
+		type: "error",
+		reason: "error",
+		error: {
+			role: "assistant",
+			content: [{ type: "thinking", thinking: "Refactoring exit execution logic" }],
+			errorMessage: "The socket connection was closed unexpectedly",
+		},
+	};
+
+	test("classifies socket-wounding terminal events as retryable", () => {
+		expect(defaultIsRetryable(socketEvent)).toBe(true);
+	});
+
+	test("terminal pi error event fails over to the next candidate", async () => {
+		const a = target("a");
+		const b = target("b");
+		const { hooks, failovers } = recordingHooks();
+		const events = await collect(
+			failoverStream([a, b], (t) =>
+				t === a
+					? streamOf([socketEvent])
+					: streamOf([{ type: "text_delta", text: "ok" }, { type: "done" }]),
+			hooks),
+		);
+		expect(failovers).toHaveLength(1);
+		expect(events.map((e) => e.type)).toEqual(["text_delta", "done"]);
 	});
 });

@@ -20,7 +20,7 @@ Pi 与 OMP 的公开扩展接口相近，但并不相同。主要差异包括模
 
 将项目改造成一个同时声明 OMP 和 Pi 扩展入口的双宿主包。保留纯路由 core，新增共享 Router Runtime，统一承担请求编排、路由决策、failover、状态、命令、日志和 Widget 行为；OMP Adapter 与 Pi Adapter 只负责将各自宿主的公开能力映射到一个共享 Host interface。可选能力通过 capability probe 检测，缺失时走可解释降级，不修改宿主源码。
 
-Pi 用户安装同一个包后，可以在模型选择器中选择 `auto-router/<profile>`，并获得与 OMP 一致的 profile、tier、target candidate chain 和 Mode A 流委托体验。Pi Adapter 使用 Pi 的公开 ModelRegistry、Provider 和认证接口委托到真实 target，保留文本、thinking、图片、工具调用、usage、错误和中止语义。
+Pi 用户安装同一个包后，可以在模型选择器中选择 `auto-router/<profile>`，并获得与 OMP 一致的 profile、tier、target candidate chain 和流委托体验。Pi Adapter 使用 Pi 的公开 ModelRegistry、Provider 和认证接口委托到真实 target，保留文本、thinking、图片、工具调用、usage、错误和中止语义。
 
 不能通过 Pi 公开接口实现的 OMP usage-report UVI 能力将显式标记为 unavailable，而不是访问 Pi 私有字段或伪造配额。其余本地预算、实际 target 成本、Provider 余额和决策解释继续可用。
 
@@ -142,7 +142,7 @@ Pi 用户安装同一个包后，可以在模型选择器中选择 `auto-router/
 44. Modifying, patching, monkey-patching, vendoring or copying OMP/Pi source is prohibited. The extension must not write into host installation directories or replace host modules at runtime.
 45. Private host access is prohibited, including private object fields, undocumented internal imports and assumptions about internal source layout. If public delegation cannot satisfy the spike, implementation must stop and reassess instead of bypassing the host interface.
 46. Host-version differences are handled by public capability probes and narrow Adapter strategies. Missing optional capabilities produce explicit degradation; missing required streaming capabilities make that Adapter unsupported with an actionable diagnostic.
-47. A set-model-before-agent fallback is not the planned implementation because it cannot preserve same-request Mode A failover. It is considered only as an explicitly degraded alternative after the spike fails.
+47. A set-model-before-agent fallback is not the planned implementation because it cannot preserve same-request failover. It is considered only as an explicitly degraded alternative after the spike fails.
 48. Work will be split into incremental changes that keep the OMP suite green: compatibility spike, Host/state extraction, Router Runtime extraction, shared commands/configuration, Pi Adapter, Pi lifecycle/degradation, then documentation and smoke verification.
 
 ## Testing Decisions
@@ -187,7 +187,7 @@ Pi 用户安装同一个包后，可以在模型选择器中选择 `auto-router/
 5. Adding provider-specific Pi quota integrations beyond existing authenticated balance endpoints.
 6. Changing the core complexity-classification vocabulary or tier ladder.
 7. Redesigning profile, tier, target, policy, budget or activation configuration schemas except where host-neutral naming is required.
-8. Implementing set-model-before-agent Mode B as the primary Pi routing strategy.
+8. Implementing a set-model-before-agent fallback as the primary Pi routing strategy.
 9. Adding new custom tools, shortcuts, custom TUI components or Provider service-tier controls.
 10. Solving general Pi built-in retry policy or changing users' global retry settings.
 11. Guaranteeing that third-party extensions observing provider hooks can see nested delegated target requests unless the Pi public interface demonstrably forwards those hooks.
@@ -198,10 +198,10 @@ Pi 用户安装同一个包后，可以在模型选择器中选择 `auto-router/
 
 ## Further Notes
 
-- The repository currently has no domain glossary or ADR directory. This spec uses the established project vocabulary from the README and source: profile, tier, target, candidate, candidate chain, routing decision, HostPorts, Mode A, failover, cooldown, circuit, UVI, shadow and adjudication.
+- The repository currently has no domain glossary or ADR directory. This spec uses the established project vocabulary from the README and source: profile, tier, target, candidate, candidate chain, routing decision, HostPorts, failover, cooldown, circuit, UVI, shadow and adjudication.
 - The installed and reviewed Pi version is 0.84.1 and serves only as the initial research baseline. Its public ModelRegistry exposes model lookup, effective Provider access, authentication resolution and completion, but does not expose a public streaming method on ModelRegistry itself. The compatibility spike validates direct effective-Provider streaming, then records the minimum public capability set rather than coupling support to 0.84.1 internals.
 - The public Pi extension lifecycle explicitly recreates extension state around new, resume, fork and reload flows. Pi Adapter should follow that lifecycle rather than copying OMP's process-global subagent protections.
 - Pi package installation expects host packages to be peer dependencies. Runtime dependencies such as YAML remain normal package dependencies. Peer ranges and compatibility claims describe tested public contracts rather than an exact local host build.
 - Development tooling may use reproducible fixture versions, but release compatibility must be verified through a small version matrix and capability probes; no build or test may patch installed host packages.
 - The intended first release should be versioned as a feature release, with release notes clearly identifying Pi UVI quota degradation, the tested version range and the required public capabilities.
-- The primary success criterion is not merely that Pi can select a target. It is that one shared Router Runtime preserves Mode A stream delegation and same-request failover without creating two behavior implementations.
+- The primary success criterion is not merely that Pi can select a target. It is that one shared Router Runtime preserves stream delegation and same-request failover without creating two behavior implementations.

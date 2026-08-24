@@ -8,7 +8,7 @@ import { defaultIsRetryable, defaultIsSubstantive, failoverStream, formatError }
 import { FeedbackTracker } from "../core/feedback-tracker";
 import { LatencyTracker } from "../core/latency-tracker";
 import { route } from "../core/pipeline";
-import { ProfileRegistry } from "../core/profile-registry";
+import { DEFAULT_ROLE, ProfileRegistry, profileTargets } from "../core/profile-registry";
 import { parseShortcut } from "../core/shortcut-parser";
 import { confidenceThreshold, llmAdjudicationEnabled, uviHardMode } from "./env";
 import type { ProviderBalance } from "./provider-dictionary";
@@ -22,6 +22,7 @@ import type {
 	StreamEventLike,
 	ThinkingLevel,
 } from "../core/types";
+import { COMPLEXITY_TIERS, formatComplexityTier } from "../core/types";
 
 export const ROUTER_DECISION_ENTRY = "com.auto-router.v1.decision";
 export const LEGACY_OMP_DECISION_ENTRY = "com.omp.auto-router.decision";
@@ -99,6 +100,8 @@ export interface RouterRequestContext {
 
 export interface RouterRequest {
 	profile: string;
+	/** Role within the profile (virtual model `<profile>/<role>`). Default: "default". */
+	role?: string;
 	context: RouterRequestContext;
 	options?: Record<string, unknown>;
 	estimatedTokens?: number;
@@ -109,10 +112,9 @@ const DEFAULT_COOLDOWN_MS = 60_000;
 const RATING_MIN_SAMPLES = 5;
 const RATING_DEMOTE_BELOW = 0.4;
 const TEST_FAILURE_ESCALATION_MS = 10 * 60_000;
-const TIER_LADDER = ["trivial", "simple", "standard", "complex"] as const;
 
 /**
- * Shared host-neutral Mode A orchestrator. The interface deliberately exposes
+ * Shared host-neutral stream-delegation orchestrator. The interface deliberately exposes
  * target streaming rather than credentials: adapters retain all auth details.
  */
 export class RouterRuntime {
@@ -123,17 +125,27 @@ export class RouterRuntime {
 
 	async *stream(request: RouterRequest): AsyncGenerator<StreamEventLike> {
 		const { text: rawPrompt, hasImages } = lastUserText(request.context);
-		const requestedProfile = parseShortcut(rawPrompt).profileOverride ?? request.profile;
+		const shortcut = parseShortcut(rawPrompt);
+		// @profile override: resolve aliases and ignore unknown names —
+		// route() records a "staying on" reasoning note for the unknown case;
+		// a bad override must never fail the request.
+		let requestedProfile = request.profile;
+		if (shortcut.profileOverride !== undefined) {
+			const resolved = this.state.registry.resolveAlias(shortcut.profileOverride) ?? shortcut.profileOverride;
+			if (this.state.registry.profile(resolved) !== undefined) requestedProfile = resolved;
+		}
 		const profile = this.state.registry.profile(requestedProfile);
 		if (!profile) throw new RouterRuntimeError(`unknown profile: ${requestedProfile}`);
-		const allTargets = Object.values(profile.tiers).flatMap((tier) => tier?.targets ?? []);
+		const role = request.role ?? DEFAULT_ROLE;
+		const roleCfg = profile.roles?.[role];
+		const allTargets = profileTargets(profile);
 		const quota = await this.fetchQuota(allTargets);
 		const candidates = await this.host.candidatesFor(allTargets, this.state.cooldowns);
 		const estimatedTokens = request.estimatedTokens ?? estimateContextTokens(request.context);
 		let priorTier = this.state.decisions.last()?.tier;
 		if (this.state.testFailureAt !== undefined && this.now() - this.state.testFailureAt < TEST_FAILURE_ESCALATION_MS && priorTier !== "complex") {
 			const floor = priorTier ?? "simple";
-			priorTier = TIER_LADDER[Math.min(TIER_LADDER.indexOf(floor) + 1, TIER_LADDER.length - 1)];
+			priorTier = COMPLEXITY_TIERS[Math.min(COMPLEXITY_TIERS.indexOf(floor) + 1, COMPLEXITY_TIERS.length - 1)];
 		}
 
 		// LLM adjudication: mixed-phase prompts ("设计并实现 X") are
@@ -141,15 +153,15 @@ export class RouterRuntime {
 		// current LLM to pick the tier. Fail-open: errors/timeouts keep the
 		// heuristic decision. Runs before route() so the adjudicated tier
 		// flows through the normal precedence (shortcut > policy > adjudication).
-		const shortcut = parseShortcut(rawPrompt);
 		let adjudicatedTier: ComplexityTier | undefined;
 		let adjudicatorModel: string | undefined;
-		if (this.host.adjudicate && llmAdjudicationEnabled()) {
+		// Adjudication spends an LLM call on tier ambiguity — only worth it for
+		// the main-session (default) role on a classified (non-fixed) chain.
+		if (this.host.adjudicate && llmAdjudicationEnabled() && role === DEFAULT_ROLE && roleCfg?.targets === undefined) {
 			const pre = classifyComplexity({
 				prompt: shortcut.cleanPrompt,
 				estimatedTokens,
 				hasImages: request.hasImages ?? hasImages,
-				conversationDepth: this.state.decisions.list().length,
 				intent: classifyIntent(shortcut.cleanPrompt),
 				shortcut,
 				...(priorTier !== undefined ? { priorTier } : {}),
@@ -180,8 +192,8 @@ export class RouterRuntime {
 			{
 				rawPrompt,
 				profile: requestedProfile,
+				role,
 				hasImages: request.hasImages ?? hasImages,
-				conversationDepth: this.state.decisions.list().length,
 				...(priorTier ? { priorTier } : {}),
 				candidates,
 				quota,
@@ -204,13 +216,24 @@ export class RouterRuntime {
 		}
 
 		const tier = this.state.registry.tierConfig(decision.profile, decision.tier);
-		const tierThinking = tier?.thinking;
+		// Fixed-chain roles route their own target list (config order in shadow
+		// mode). The pipeline is the single source for the fixed-chain rule and
+		// the thinking precedence (shortcut pins already escaped there) — the
+		// runtime consumes the stamps and never re-derives them.
+		const fixedChain = decision.fixedChain === true;
+		const chainTargets = fixedChain ? roleCfg?.targets : tier?.targets;
 		const order = this.state.shadowEnabled
-			? tier?.targets.filter((target) => candidates.some((candidate) => candidate.key === targetKey(target) && candidate.healthy)) ?? []
-			: demotePoorlyRated(decision.orderedCandidates, this.state.ratings);
+			? chainTargets?.filter((target) => candidates.some((candidate) => candidate.key === targetKey(target) && candidate.healthy)) ?? []
+			: fixedChain
+				// The pipeline already emitted the declared chain order; rating
+				// demotion is for adaptive tier chains, not an operator-fixed one.
+				? decision.orderedCandidates
+				: demotePoorlyRated(decision.orderedCandidates, this.state.ratings);
 		decision.orderedCandidates = order;
 		if (order[0]) decision.target = order[0];
-		const configuredThinking = decision.target.thinking ?? tierThinking;
+		// Per-target thinking: target override > chain-level stamp (role > tier).
+		const chainThinking = decision.chainThinking;
+		const configuredThinking = decision.target.thinking ?? chainThinking;
 		const selectedThinking = configuredThinking && this.host.clampThinking
 			? this.host.clampThinking(decision.target, configuredThinking)
 			: configuredThinking;
@@ -227,7 +250,7 @@ export class RouterRuntime {
 			throw new RouterRuntimeError(`no eligible candidates for profile "${decision.profile}" tier=${decision.tier}${detail}`);
 		}
 		this.host.setStatus?.(
-			`auto-router ${decision.profile} | tier=${decision.tier} (${decision.confidence.toFixed(2)}) | ${decision.target.provider}/${decision.target.model}`,
+			`auto-router ${decision.profile}${decision.role !== DEFAULT_ROLE ? `/${decision.role}` : ""} | tier=${formatComplexityTier(decision.tier)} (${decision.confidence.toFixed(2)}) | ${decision.target.provider}/${decision.target.model}`,
 		);
 		rewriteLastUserText(request.context, cleanPrompt);
 
@@ -239,7 +262,7 @@ export class RouterRuntime {
 		const factory = async function* (target: RouteTarget): AsyncGenerator<StreamEventLike> {
 			const key = targetKey(target);
 			targetStarts.set(key, runtime.now());
-			const configuredThinking = target.thinking ?? tierThinking;
+			const configuredThinking = target.thinking ?? chainThinking;
 			const thinking = configuredThinking && runtime.host.clampThinking
 				? runtime.host.clampThinking(target, configuredThinking)
 				: configuredThinking;
@@ -264,8 +287,12 @@ export class RouterRuntime {
 			onFailover: (from: RouteTarget, to: RouteTarget, error: unknown) => {
 				this.state.eventLog.append({ type: "failover", at: this.now(), from: targetKey(from), to: targetKey(to), error: formatError(error) });
 			},
-			onTargetSettled: (target: RouteTarget) => {
+			onTargetOutput: (target: RouteTarget) => {
+				// Needed immediately for done-event usage attribution; do not mark
+				// the target healthy until the stream finishes cleanly.
 				settledTarget = target;
+			},
+			onTargetSettled: (target: RouteTarget) => {
 				const key = targetKey(target);
 				this.state.circuit.recordSuccess(key);
 				this.state.cooldowns.delete(key);
@@ -273,9 +300,9 @@ export class RouterRuntime {
 				if (firstOutput !== undefined) this.state.latency.record(key, firstOutput);
 				if (!this.state.shadowEnabled) {
 					this.state.sessionUsage.calls.set(key, (this.state.sessionUsage.calls.get(key) ?? 0) + 1);
-					if (target.thinking ?? tierThinking) {
+					if (target.thinking ?? chainThinking) {
 						const levels = this.state.sessionUsage.thinking.get(key) ?? new Set<string>();
-						levels.add(target.thinking ?? tierThinking!);
+						levels.add((target.thinking ?? chainThinking)!);
 						this.state.sessionUsage.thinking.set(key, levels);
 					}
 				}
@@ -294,7 +321,7 @@ export class RouterRuntime {
 		this.state.decisions.record(decision);
 		this.state.lastDecision = { at: this.now(), decision, cleanPrompt };
 		this.host.persistDecision(ROUTER_DECISION_ENTRY, decision);
-		this.state.eventLog.append({ type: "decision", at: this.now(), profile: decision.profile, tier: decision.tier, target: decision.target });
+		this.state.eventLog.append({ type: "decision", at: this.now(), profile: decision.profile, role: decision.role, tier: decision.tier, target: decision.target });
 	}
 
 	private async fetchQuota(targets: RouteTarget[]): Promise<Record<string, QuotaSnapshot>> {
@@ -381,10 +408,20 @@ function rewriteLastUserText(context: RouterRequestContext, text: string): void 
 	}
 }
 
-function estimateContextTokens(context: RouterRequestContext): number {
-	const body = context.messages.flatMap((message) => Array.isArray(message.content) ? message.content : []).filter(isTextPart).map((part) => part.text).join("");
+/** Estimate the token count of a request context (chars/4 heuristic over all text parts). */
+export function estimateContextTokens(context: RouterRequestContext): number {
+	let chars = 0;
+	for (const message of context.messages) {
+		if (typeof message.content === "string") {
+			chars += message.content.length;
+		} else if (Array.isArray(message.content)) {
+			for (const part of message.content) {
+				if (isTextPart(part)) chars += part.text.length;
+			}
+		}
+	}
 	const systemPrompt = Array.isArray(context.systemPrompt) ? context.systemPrompt.join("") : context.systemPrompt ?? "";
-	return Math.max(1, Math.ceil((body + systemPrompt).length / 4));
+	return Math.max(1, Math.ceil((chars + systemPrompt.length) / 4));
 }
 
 function isTextPart(value: unknown): value is { type: "text"; text: string } {

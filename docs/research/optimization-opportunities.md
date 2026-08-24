@@ -67,6 +67,7 @@
 - **现状**：`conversationDepth` 在类型和注释里宣称「同任务连续轮次」（`src/core/types.ts:278-279`、`src/core/complexity-classifier.ts:27-28`），但 `classifyComplexity` 函数体从未解构使用它（解构见 `complexity-classifier.ts:163`）；适配层传入的值是 `state.decisions.list().length`——本会话全部决策数，与「同任务」无关（`src/omp-adapter/router.ts:163`）。同时 sticky escalation 的规则是「会话内永不降级」（`complexity-classifier.ts:259-265`），意味着一次 complex 查询会把整个会话剩余请求钉在 complex 层。README 宣称的是「同任务多轮粘性升级、不降级」（README.md 复杂度分级节）。
 - **建议**：引入任务边界判定（如时间间隔 > N 分钟或话题切换即重置 priorTier），或给 sticky escalation 加衰减窗；删除或启用 conversationDepth。
 - **收益**：中（影响每次后续请求的成本）。**工作量**：中。
+- **处置**：✅ 死参数 `conversationDepth` 已删除（0.6.1 冗余清理）；sticky escalation 的任务边界问题未做，仍待 B2 原建议。
 
 #### B3. 每次请求动态编译 ~70+ 个正则
 
@@ -115,11 +116,11 @@
 | # | 问题 | 证据 | 工作量 |
 |---|---|---|---|
 | C1 | `useage` 拼写错误扩散到用户可见命令名 `/auto-router useage` | `src/omp-adapter/state.ts:58`（`sessionUseage`）、`src/omp-adapter/commands.ts:233`（SUBCOMMANDS 表）；且 README 命令表完全没有收录该命令 | 极低（加 `usage` 别名，保留旧名兼容） |
-| C2 | `loadAdapterConfig`（async）与 `loadAdapterConfigSync` 双实现漂移风险；生产只用 sync 版，测试只测 async 版 | `src/omp-adapter/config.ts:67-91` vs `config.ts:99-124`；`src/omp-adapter/index.ts:37` 用 sync；`tests/omp-adapter/config.test.ts:7` 只 import async 版 | 低（合并共享实现，生产/测试同源） |
+| C2 | `loadAdapterConfig`（async）与 `loadAdapterConfigSync` 双实现漂移风险；生产只用 sync 版，测试只测 async 版 | `src/omp-adapter/config.ts:67-91` vs `config.ts:99-124`；`src/omp-adapter/index.ts:37` 用 sync；`tests/omp-adapter/config.test.ts:7` 只 import async 版 | ✅ 0.6.1（loader 合并进 `runtime/config.ts` 单实现，omp 侧仅保留路径接线） |
 | C3 | `sessionId` 死管道：从未赋值（仅 reload 时复制），却一直传给 `getApiKey` | `src/omp-adapter/state.ts:31`、`src/omp-adapter/index.ts:89`、`src/omp-adapter/host-ports.ts:31` | 极低（接上真实 session id 或删除字段） |
 | C4 | `HostPorts.appendState/readState` 死端口：适配层实现了（`src/omp-adapter/host-ports.ts:98-110`），但 index.ts 直接调 `pi.appendEntry` / 直读 `sessionManager.getBranch()`（`src/omp-adapter/index.ts:150,209-216`），端口零调用 | `src/core/host-ports.ts:47-50` | 极低（收窄接口或改走端口） |
 | C5 | `complexity-classifier.ts` 第 33-34 行注释块出现连续 `/**` `/**`（文档注释嵌套笔误） | `src/core/complexity-classifier.ts:33-34` | 极低 |
-| C6 | Mode B 预留完全 inert：`pi.on("input", () => {})` 空处理器 | `src/omp-adapter/index.ts:198-199` | 极低（保留即可，属已知预留） |
+| C6 | ~~inert 预留 `pi.on("input", () => {})` 空处理器~~（该预留已移除，问题不存在） | 原 `src/omp-adapter/index.ts:198-199` | 极低 |
 
 ---
 
@@ -130,7 +131,7 @@
 ### E1. `before_provider_request` / `after_provider_response` — 全量请求观测与改写 【价值：高】
 
 - **omp 支持**：`omp://extensions.md` "Prompt and turn lifecycle"：`before_provider_request` 可替换 provider 请求载荷，`after_provider_response` 观测响应。
-- **结合点**：(a) 当前用量/延迟统计只覆盖走 `auto-router/*` 虚拟模型的请求；挂上这两个事件后，用户手动 `/model` 选的直连模型也能纳入统计与事件日志，数据完整性大幅提升；(b) `before_provider_request` 是 Mode B 的天然载体（改写目标模型而非委派流），也是实现 A1（thinking 注入真实请求）的另一条路径。
+- **结合点**：(a) 当前用量/延迟统计只覆盖走 `auto-router/*` 虚拟模型的请求；挂上这两个事件后，用户手动 `/model` 选的直连模型也能纳入统计与事件日志，数据完整性大幅提升；(b) `before_provider_request` 是 set-model 改写式路由（改写目标模型而非委派流）的天然载体，也是实现 A1（thinking 注入真实请求）的另一条路径。
 - **成本**：中。需处理「非本扩展路由的请求」与「本扩展委派的请求」的去重（避免双重计数）。
 
 ### E2. `tool_call` / `tool_result` 拦截 — 结果驱动的复杂度再评估 【价值：高】
@@ -269,7 +270,7 @@
 | P2 | A6 评分反哺排序（先 explain 展示，后 demote） | 优化 | 中 | 中 | 「反馈闭环」承诺的最小闭环 |
 | P2 | B4 failover 延迟按候选计时 | 优化 | 中 | 低 | 排序正确性修复 |
 | P2 | E2 tool_result 拦截 + 测试结果检测 | 扩展 | 高 | 中 | 差异化能力，上游已验证形态 |
-| P2 | E1 before/after_provider_request 观测 | 扩展 | 高 | 中 | 统计完整性 + Mode B 载体 |
+| P2 | E1 before/after_provider_request 观测 | 扩展 | 高 | 中 | 统计完整性 + set-model 改写式路由载体 |
 | P2 | C2 配置加载双实现合并 + T3 sync 版测试 | 卫生+测试 | 中 | 低 | 消除「测的不是跑的」 |
 | P3 | A3/B7 balanceEndpoint 通用 balance fetcher + provider registry | 优化 | 中 | 中 | 扩 provider 的前置条件 | ✅ 0.3.0 |
 | P3 | B3 正则预编译 | 优化 | 低-中 | 极低 | 热路径零风险提速 | ✅ 0.3.0 |
@@ -283,7 +284,7 @@
 | P4 | E5 快捷键/flag、E11 主动告警 | 扩展 | 中 | 低 | 体验增强 | 未做（API 形态需宿主内验证） |
 | P4 | E6 消息渲染器、E9 LLM 工具、E12 service tier | 扩展 | 中 | 中 | 锦上添花 | 未做（API 形态需宿主内验证） |
 | P5 | E10 memory、E13 MCP 推送、E14 user_bash、E15 compact 感知 | 扩展 | 低 | 低-中 | 远期选项，依赖外部条件 |
-| P5 | B2 conversationDepth/任务边界 | 优化 | 中 | 中 | 需要先定义「任务边界」，建议与 E15 一起做 |
+| P5 | B2 conversationDepth/任务边界 | 优化 | 中 | 中 | 需要先定义「任务边界」，建议与 E15 一起做 | ✅ 死参数已删除（0.6.1）；任务边界未做 |
 
 **建议的第一批落地组合（一个迭代可完成）**：A2 + A5 + B1/E3 + B5 + B4 + B3 + C1/C2/C3/C4 + T2 + T3。共同特征：core 侧能力已就绪或 omp API 现成，改动集中在适配层，风险低、收益立竿见影。
 

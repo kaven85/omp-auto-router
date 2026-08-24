@@ -8,21 +8,16 @@
 
 import { formatError } from "../core/failover-engine";
 import type { HostModel, HostPorts } from "../core/host-ports";
-import type { CandidateInfo, QuotaSnapshot, RouteTarget, ThinkingLevel } from "../core/types";
+import type { CandidateInfo, QuotaSnapshot, RouteTarget } from "../core/types";
 import type { AdapterState } from "./state";
-import type { OmpExtensionApi, OmpExtensionContext, OmpModel } from "./omp-api";
+import type { OmpExtensionContext, OmpModel } from "./omp-api";
 import { redactSecrets } from "../core/redact";
 
 export function createHostPorts(
-	pi: OmpExtensionApi,
 	ctx: OmpExtensionContext,
 	state: AdapterState,
 ): HostPorts {
 	return {
-		listModels(): HostModel[] {
-			return ctx.models.list().map(wrapModel);
-		},
-
 		resolveModel(spec: string): HostModel | undefined {
 			const model = ctx.models.resolve(spec);
 			return model ? wrapModel(model) : undefined;
@@ -36,16 +31,6 @@ export function createHostPorts(
 
 		isHealthy(target: RouteTarget): boolean {
 			return ctx.models.resolve(`${target.provider}/${target.model}`) !== undefined;
-		},
-
-		async setModel(key: string): Promise<boolean> {
-			const model = ctx.models.resolve(key);
-			if (!model) return false;
-			return pi.setModel(model);
-		},
-
-		setThinkingLevel(level: ThinkingLevel): void {
-			pi.setThinkingLevel(level);
 		},
 
 		async fetchQuota(providers: string[]): Promise<QuotaSnapshot[]> {
@@ -96,14 +81,6 @@ export function createHostPorts(
 			}
 		},
 
-		notify(message: string, level: "info" | "warning" | "error"): void {
-			try {
-				ctx.ui.notify(message, level);
-			} catch {
-				// headless/no-ui contexts: notify is a no-op; never crash on it
-			}
-		},
-
 		setStatus(text: string): void {
 			try {
 				ctx.ui.setStatus(text);
@@ -118,14 +95,6 @@ export function createHostPorts(
 			} catch {
 				// no-op when the host lacks the widget surface
 			}
-		},
-
-		now(): number {
-			return Date.now();
-		},
-
-		cwd(): string {
-			return ctx.cwd;
 		},
 	};
 }

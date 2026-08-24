@@ -1,73 +1,20 @@
 /**
- * Adapter-side state shared across the extension entry: the router's core
- * singletons plus the adapter's host mappings. One instance per session.
+ * Adapter-side state shared across the extension entry: the persistent
+ * runtime state (src/runtime/state) plus the omp-specific host mappings.
+ * One instance per session.
  */
 
-import { BudgetTracker } from "../core/budget-tracker";
-import { CircuitBreaker } from "../core/circuit-breaker";
-import { sanitizeClassifierOverrides, type ClassifierOverrides } from "../core/complexity-classifier";
-import { DecisionStore } from "../core/decision-store";
-import { EventLog } from "../core/event-log";
-import { FeedbackTracker } from "../core/feedback-tracker";
-import { JsonStateStore } from "../core/state-store";
-import { LatencyTracker } from "../core/latency-tracker";
-import { ProfileRegistry } from "../core/profile-registry";
-import type { HostPorts } from "../core/host-ports";
-import type { BudgetLimit, RouterConfig, RoutingDecision, QuotaSnapshot } from "../core/types";
-import type { ProviderBalance } from "../runtime/provider-dictionary";
-import { cooldownAfterFailureMs } from "../runtime/env";
+import { createPersistentRuntimeState, type PersistentRuntimeState } from "../runtime/state";
+import type { RouterConfig } from "../core/types";
 import type { OmpExtensionContext, OmpModel } from "./omp-api";
 
-export function collectProfileBudgets(config: RouterConfig): Record<string, BudgetLimit> {
-	const merged: Record<string, BudgetLimit> = {};
-	for (const profile of Object.values(config.profiles)) {
-		if (!profile.budgets) continue;
-		for (const [provider, limit] of Object.entries(profile.budgets)) {
-			merged[provider] = limit;
-		}
-	}
-	return merged;
-}
-
-/** Warm-start circuit breaker and first-visible-output rolling means from persisted snapshots. */
-function restoreTrackers(stateStore: JsonStateStore, circuit: CircuitBreaker, latency: LatencyTracker): void {
-	const circuitSnapshot = stateStore.readJson<Record<string, { consecutiveFailures: number; openedAt: number; cooldownMs: number }>>("circuit.json");
-	if (circuitSnapshot) circuit.restore(circuitSnapshot);
-	const latencySnapshot = stateStore.readJson<Record<string, number>>("first-output-latency.json");
-	if (latencySnapshot) latency.restore(latencySnapshot);
-}
-
-/** Persist circuit breaker + first-visible-output latency snapshots across restarts. */
-export function persistTrackers(state: AdapterState): void {
-	state.stateStore.writeJson("circuit.json", state.circuit.snapshot());
-	state.stateStore.writeJson("first-output-latency.json", state.latency.snapshot());
-}
-
-/** Persist classifier keyword overrides (`/auto-router rules add/remove/reset`). */
-export function persistClassifierOverrides(state: AdapterState): void {
-	state.stateStore.writeJson("classifier-rules.json", state.classifierOverrides);
-}
-
-export interface AdapterState {
-	config: RouterConfig;
-	registry: ProfileRegistry;
-	circuit: CircuitBreaker;
-	latency: LatencyTracker;
-	budgets: BudgetTracker;
-	decisions: DecisionStore;
-	eventLog: EventLog;
-	/** agentDir-scoped JSON state (config-independent persistence). */
-	stateStore: JsonStateStore;
+export interface AdapterState extends PersistentRuntimeState {
 	/** Raw omp models by "provider/id" key, from ctx.models.list(). */
 	modelsByKey: Map<string, OmpModel>;
-	/** Cached HostPorts bound to the adopted ctx; rebuilt when ctx changes. */
-	hostPorts: { ctx: OmpExtensionContext; host: HostPorts } | undefined;
-	/** True once a configured target resolved in the live registry; skips the per-request polling grace period. */
-	modelsReady: boolean;
+	/** Configured target keys observed in the live registry, scoped per chain instead of globally. */
+	readyModelKeys: Set<string>;
 	/** Resolved project path for path-activation; mirrors ctx.cwd. */
 	cwd: string;
-	/** Last pipeline result (for /auto-router explain). */
-	lastDecision: { at: number; decision: RoutingDecision; cleanPrompt: string } | undefined;
 	/** Capability-probe results (H1..H7) filled by the entry / doctor. */
 	doctorProbes: {
 		registerProvider: boolean;
@@ -78,41 +25,8 @@ export interface AdapterState {
 		ui: boolean;
 		quota: boolean;
 	};
-	/** Non-fatal config validation errors surfaced by /auto-router doctor. */
-	configErrors: string[];
 	/** Host extension context captured at session_start (streams run outside ctx). */
 	ctx?: OmpExtensionContext;
-	/** UVI monitoring on/off (default on; /auto-router uvi toggle). */
-	uviEnabled: boolean;
-	/** Shadow mode: log pipeline result but route in config order (default off). */
-	shadowEnabled: boolean;
-	/** Throttled quota fetch cache: { at, data }. */
-	quotaCache: { at: number; data: QuotaSnapshot[] };
-	/** Epoch ms of the most recent balance fetch (throttles the request path). */
-	balanceAt: number;
-	/** Throttled per-provider balance cache (balance-capable providers only). */
-	balanceCache: Record<string, ProviderBalance>;
-	/** "provider/model" → transient post-failure exclusion (expiry + the failure that caused it). */
-	cooldowns: Map<string, { until: number; reason: string }>;
-	/** Post-failure target exclusion window, resolved from the env chain at boot. */
-	cooldownAfterFailureMs: number;
-	/** Last rendered widget payload; identical re-renders are suppressed (instance-local). */
-	widgetPayload?: string;
-	/** Epoch ms of the most recent test/build tool failure; drives temporary tier escalation. */
-	testFailureAt: number | undefined;
-	/** User ratings of routing decisions. */
-	ratings: FeedbackTracker;
-	/** User-edited classifier keyword overrides, persisted as classifier-rules.json. */
-	classifierOverrides: ClassifierOverrides;
-	/** Per-session settled-call stats (normal mode only; shadow pauses counting). */
-	sessionUsage: {
-		/** "provider/model" → successful settled call count this session. */
-		calls: Map<string, number>;
-		/** "provider/model" → estimated USD cost this session. */
-		cost: Map<string, number>;
-		/** "provider/model" → distinct thinking levels used this session (shadow pauses tracking). */
-		thinking: Map<string, Set<string>>;
-	};
 }
 
 export function createAdapterState(
@@ -121,38 +35,11 @@ export function createAdapterState(
 	cwd: string,
 	configErrors: string[] = [],
 ): AdapterState {
-	const stateStore = new JsonStateStore(stateDir);
-	const usageStore = {
-		load: () => stateStore.readJson<import("../core/types").BudgetUsage>("budget-usage.json"),
-		save: (v: unknown) => stateStore.writeJson("budget-usage.json", v),
-	};
-	const limitsStore = {
-		load: () => stateStore.readJson<Record<string, import("../core/types").BudgetLimit>>("budget-limits.json"),
-		save: (v: unknown) => stateStore.writeJson("budget-limits.json", v),
-	};
-	const ratingsStore = {
-		load: () => stateStore.readJson<import("../core/types").RatingEntry[]>("ratings.json"),
-		save: (v: unknown) => stateStore.writeJson("ratings.json", v),
-	};
-	const budgets = new BudgetTracker(usageStore, limitsStore);
-	budgets.mergeProfileLimits(collectProfileBudgets(config));
-	const circuit = new CircuitBreaker();
-	const latency = new LatencyTracker();
-	restoreTrackers(stateStore, circuit, latency);
 	return {
-		config,
-		registry: new ProfileRegistry(config, { cwd }),
-		circuit,
-		latency,
-		budgets,
-		decisions: new DecisionStore(),
-		eventLog: new EventLog(stateDir),
-		stateStore,
+		...createPersistentRuntimeState(config, stateDir, cwd, configErrors),
 		modelsByKey: new Map(),
-		hostPorts: undefined,
-		modelsReady: false,
+		readyModelKeys: new Set(),
 		cwd,
-		lastDecision: undefined,
 		doctorProbes: {
 			registerProvider: false,
 			models: false,
@@ -162,18 +49,6 @@ export function createAdapterState(
 			ui: false,
 			quota: false,
 		},
-		configErrors,
-		uviEnabled: true,
-		shadowEnabled: false,
-		balanceAt: 0,
-		balanceCache: {},
-		quotaCache: { at: 0, data: [] },
-		cooldowns: new Map(),
-		cooldownAfterFailureMs: cooldownAfterFailureMs(),
-		testFailureAt: undefined,
-		ratings: new FeedbackTracker(ratingsStore),
-		classifierOverrides: sanitizeClassifierOverrides(stateStore.readJson("classifier-rules.json")),
-		sessionUsage: { calls: new Map(), cost: new Map(), thinking: new Map() },
 	};
 }
 

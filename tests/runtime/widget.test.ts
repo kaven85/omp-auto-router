@@ -43,6 +43,7 @@ function createState(withProfileBudgets = true): RouterRuntimeState {
 function decisionFixture(): RoutingDecision {
 	return {
 		profile: "default",
+		role: "default",
 		tier: "standard",
 		confidence: 0.9,
 		target: { provider: "deepseek", model: "flash", billing: "per-token" },
@@ -70,7 +71,7 @@ describe("shared widget", () => {
 		const state = createState();
 		state.latency.record("deepseek/flash", 1_500);
 		const lines = buildWidgetLines(state, decisionFixture());
-		expect(lines[0]).toBe("default | tier=standard | deepseek/flash (per-token) | low | first output=1.5s");
+		expect(lines[0]).toBe("default | tier=常规开发 (standard) | deepseek/flash (per-token) | low | first output=1.5s");
 		expect(lines.some((line) => line.startsWith("budgets: deepseek $0.00/$5/mo (0%)"))).toBe(true);
 	});
 

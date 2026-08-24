@@ -72,7 +72,6 @@ const result = route(
 	{
 		rawPrompt: COMPLEX_PROMPT,
 		hasImages: false,
-		conversationDepth: 0,
 		candidates,
 		quota: {},
 		now: NOW,

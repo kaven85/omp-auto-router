@@ -10,18 +10,9 @@
 import { streamSimple } from "@oh-my-pi/pi-ai";
 
 import type { HostPorts } from "../core/host-ports";
-import { buildAdjudicationPrompt, parseAdjudicationResponse } from "../core/llm-adjudication";
+import { ADJUDICATION_MAX_CHARS, ADJUDICATION_TIMEOUT_MS, buildAdjudicationPrompt, parseAdjudicationResponse } from "../core/llm-adjudication";
 import type { ComplexityTier, RouteTarget } from "../core/types";
 import type { AdapterState } from "./state";
-
-/** Bounded wait for the adjudication stream; the real request is waiting. */
-const ADJUDICATION_TIMEOUT_MS = 15_000;
-
-/**
- * Cap on accumulated reply text — a runaway or hostile stream must not grow
- * memory unbounded; the tier word arrives in the first bytes anyway.
- */
-const ADJUDICATION_MAX_CHARS = 4_096;
 
 export interface AdjudicationResult {
 	tier: ComplexityTier;

@@ -11,6 +11,12 @@
 
 import type { ComplexityTier } from "./types";
 
+/** Bounded wait for the adjudication stream; the real request is waiting. */
+export const ADJUDICATION_TIMEOUT_MS = 15_000;
+
+/** Cap on accumulated reply text — a runaway or hostile stream must not grow memory unbounded. */
+export const ADJUDICATION_MAX_CHARS = 4_096;
+
 /** Build the one-shot adjudication prompt for a user request. */
 export function buildAdjudicationPrompt(userPrompt: string): string {
 	return [

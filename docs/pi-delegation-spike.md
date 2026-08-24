@@ -1,6 +1,6 @@
-# Pi Mode A compatibility spike
+# Pi delegation compatibility spike
 
-This repository validates Pi Mode A delegation without modifying Pi or OMP.
+This repository validates Pi stream delegation without modifying Pi or OMP.
 The probe is intentionally not registered in the package manifest; run it only
 for compatibility verification:
 

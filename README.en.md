@@ -9,6 +9,7 @@ Ported from the design ideas of [pi-auto-router](https://github.com/danialranjha
 ## Capabilities
 
 - **Profile system**: multiple named profiles (e.g. `premium`/`economy`/`offline`), millisecond switching
+- **Role routing (profile >> role)**: per-omp-role refinement inside a profile (default/task/smol/…) — fixed `targets` chains (skip classification, zero overhead) or `tierFloor`/`tierCap` soft clamps (classification kept, bounded); shortcut pins always escape
 - **Complexity tiers**: every request is auto-classified as `trivial / simple / standard / complex`; tier drives model + thinking effort
 - **Explicit pinning**: `@reasoning` / `@swe` / `@long` / `@vision` / `@fast` / `@profile:<name>` (tokens are stripped automatically — the model never sees them)
 - **Same-request failover**: if the first target fails (retryable error, no substantive output), the next candidate takes over; thinking-only partials don't block the switch
@@ -121,7 +122,7 @@ Restart the session. All requests now go through `auto-router/test`.
 
 ```text
 [ ] /auto-router doctor
-    → H1 registerProvider/stream ✅, H2 ctx.models has a count, no config errors
+    → H1 registerProvider/stream ✅, H2 ctx.models has a count, no config errors, no ❌ in the modelRoles check
 [ ] send a message
     → tail ~/.omp/agent/auto-router/auto-router.events.jsonl shows a decision + settled pair
 [ ] /auto-router explain
@@ -144,6 +145,7 @@ Restart the session. All requests now go through `auto-router/test`.
 | doctor shows config errors | auto-router.yml validation failed (e.g. empty targets) | fix the reported dotted path; the broken layer falls back to builtin defaults |
 | decisions are all budget blocks/chain switches | budget exceeded or UVI critical | `/auto-router budget show`, `/auto-router uvi show`; retry after `clear` |
 | subagents bypass routing | `modelRoles.task` not configured | add `task: auto-router/<profile>`; confirm the subagent model change (`model_change` entry in the session file) |
+| doctor reports `❌ modelRoles` | modelRoles points at a missing profile or an unregistered virtual model (usually a typo) | fix `config.yml` using the available-profile list in the doctor line; `⚠️ role not declared` means that role is undeclared in the profile and routes as the default chain |
 | config unchanged after `/auto-router reload` | you edited the project layer but cwd doesn't match | confirm `<cwd>/.omp/auto-router.yml` exists and cwd matches |
 | Pi: profile routes but every candidate is skipped as unauthenticated | target provider has no credentials in Pi's auth storage | run `/login` (or the provider's auth flow) for the target provider, then retry |
 | Pi: target is available in `/model` but never routed to | scoped models (`enabledModels`/`--models`) exclude it | include both the virtual `auto-router/*` profiles AND the real targets in the scope |
@@ -172,6 +174,14 @@ Config has two layers, merged by the plugin (builtin defaults < user < project):
 | project | `<repo>/.omp/auto-router.yml` | `<repo>/.pi/auto-router.yml` (loaded only when the project is trusted) | overrides within that project (same-name profiles are replaced wholesale) |
 
 Quick start: copy `auto-router.example.yml` from the repo root to your user-layer path, and replace `targets` with models that actually exist in your model selector.
+
+> **Dual-host sync (maintenance convention)**: when running both omp and Pi, the two user-layer configs drift easily. On this machine they are hard-linked to the same inode, so editing either path updates both:
+>
+> ```bash
+> ln -f ~/.omp/agent/auto-router.yml "${PI_CODING_AGENT_DIR:-~/.pi/agent}/auto-router.yml"
+> ```
+>
+> Caveat: **editors that save atomically (write temp file + rename) break the hard link** — VS Code and some JetBrains IDEs do this by default. If a change does not show up in the other host, check both paths with `ls -li`; when the inodes differ, re-run the `ln` command above. Re-run it as well when provisioning or migrating machines.
 
 ### Full example
 
@@ -233,8 +243,20 @@ activate:                           # auto-activate by cwd prefix
 | `description` | string | no | display only |
 | `defaultTier` | `trivial/simple/standard/complex` | no | fallback when classifier confidence < 0.45; default `standard` |
 | `tiers` | mapping | ✅ | keys limited to these four tiers; subsets allowed (ladder fallback: up first, then down) |
+| `roles` | mapping | no | role routing: key is the role name (lowercase letters/digits/dashes) → role config, see the table below |
 | `budgets` | mapping | no | key is provider name → budget limit |
 | `rules` | array | no | policy rule array |
+
+#### role
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `targets` | array | required for a fixed chain | non-empty target array; the role takes this failover chain verbatim and skips classification. **Mutually exclusive with `tierFloor`/`tierCap`** |
+| `tierFloor` | one of the four tiers | no | classification floor (raised when below) |
+| `tierCap` | one of the four tiers | no | classification cap (clamped when above); `tierFloor` must not rank above `tierCap` |
+| `thinking` | `off/minimal/low/medium/high/xhigh/max` | no | thinking override for this role (precedence: target > role > tier) |
+
+Shortcut pins (`@fast`/`@swe`/`@reasoning`) are exempt from fixed chains and clamps — they always escape into the classified tier.
 
 #### tier
 
@@ -315,7 +337,7 @@ With no config file, or when all layers fail to parse, the plugin falls back to 
 
 ## Pi support and capability degradation
 
-On Pi the same routing core and command set run through the Pi adapter (`src/pi-adapter`), which delegates to real providers only via Pi's **public** ModelRegistry/Provider interfaces (Mode A). Behavior differences to be aware of:
+On Pi the same routing core and command set run through the Pi adapter (`src/pi-adapter`), which delegates to real providers only via Pi's **public** ModelRegistry/Provider interfaces. Behavior differences to be aware of:
 
 - **Profile models**: every profile appears in the model selector as `auto-router/<profile>`; `/auto-router use <profile>` switches through the model registry. Command names and argument grammar are shared with omp; host-capability differences are explicit below.
 - **Config locations**: user layer `<agentDir>/auto-router.yml` (agentDir = `$PI_CODING_AGENT_DIR`, else `~/.pi/agent`); project layer `<repo>/.pi/auto-router.yml` is read **only when the project is trusted** — untrusted projects are ignored, and `/auto-router doctor` says so.
@@ -331,8 +353,8 @@ On Pi the same routing core and command set run through the Pi adapter (`src/pi-
 
 | Command | Pi behavior | omp difference |
 |---|---|---|
-| `status` | Identifies `mode: A (stream delegation)` after the active profile and latest decision. | omp reports its own adapter mode/state. |
-| `doctor` | Reports the required public Mode A surface, project-trust state, and UVI as an **optional unavailable** capability. | The omp adapter reports its H1–H7 host probe matrix and can expose quota capabilities. |
+| `status` | Shows the active profile and latest decision. | omp reports its own adapter state. |
+| `doctor` | Reports the required public delegation surface, project-trust state, and UVI as an **optional unavailable** capability. | The omp adapter reports its H1–H7 host probe matrix and can expose quota capabilities. |
 | `uvi show\|enable\|disable\|refresh` | Every action returns the explicit unavailable notice; it does not toggle state or fabricate/refetch quota. | Available only when omp exposes usage-report quota data. |
 | `usage [page]` | Shows settled local calls, local budgets, and any authenticated provider balance; UVI/quota windows are unavailable. | Can include host usage-report quota windows. |
 | `use <profile>` | Resolves the already-registered `auto-router/<profile>` through Pi's public model registry. With scoped models, both the virtual profile and real targets must be allowed. | omp resolves through its model facade/model-role configuration. |
@@ -362,14 +384,50 @@ modelRoles:
 
 Once selected, **no manual intervention is needed**: every request is auto-classified and routed. Switch anytime with `/auto-router use <profile|alias>` (millisecond-level, persisted per session).
 
+### Role routing (profile >> role)
+
+`task: auto-router/economy` above switches the **whole profile** — that is the coarsest split. To refine by role *inside* one profile (typical setup: `company` / `personal` profiles each owning a provider set, with the role picking the model within it), declare `roles` in the profile and point omp roles at `auto-router/<profile>/<role>`:
+
+```yaml
+# auto-router.yml
+profiles:
+  company:
+    defaultTier: standard
+    tiers: { … }                    # default role: complexity classification, unchanged
+    roles:
+      task:                          # fixed chain: skip classification, zero overhead
+        targets: [{ provider: deepseek, model: deepseek-v4-flash, billing: per-token }]
+      smol: { tierCap: simple }      # soft clamp: classify as usual, cap at simple
+      slow: { tierFloor: complex }   # soft clamp: floor at complex
+```
+
+```yaml
+# ~/.omp/agent/config.yml
+modelRoles:
+  default: auto-router/company        # bare id ≡ company/default
+  task:    auto-router/company/task
+  smol:    auto-router/company/smol
+  slow:    auto-router/company/slow
+```
+
+Rules:
+
+- **Fixed chain** (`targets`): every request of this role takes this failover chain verbatim — no classification, no LLM adjudication; `thinking` overridable.
+- **Soft clamp** (`tierFloor` / `tierCap`): classification runs as usual (sticky escalation, test-failure escalation included); the result is clamped into the band.
+- **Pin escape**: `@fast` / `@swe` / `@reasoning` always win — even on a fixed-chain role, a pin jumps out of the chain into the classified tier's chain.
+- Undeclared roles route as `default`; `roles.default` can clamp the main session itself (e.g. `tierFloor: simple` keeps it off trivial).
+- LLM adjudication only runs for the `default` role — task/smol etc. skip that extra call.
+- Role names: lowercase letters/digits/dashes (they land in the virtual model id). omp's role set is documented by omp (default/smol/slow/vision/plan/designer/commit/tiny/task/advisor); declaring names omp doesn't know is harmless but unused.
+- Each declared role shows in `/model` as `Auto Router: <profile> (<role>)`; the status line, `explain`, and the event log all carry the role.
+
 ## Complexity tiers & shortcuts
 
 | Tier | Typical signals | Effect |
 |---|---|---|
-| `trivial` | short Q&A, no code | thinking low |
+| `trivial` | short Q&A (judged on the prompt, independent of context length), no code | thinking low |
 | `simple` | single-file edits, explanations, grep-like | thinking low |
-| `standard` | code blocks, multi-file paths, diffs, implementation phrasing | thinking medium |
-| `complex` | refactor/migration/architecture keywords, long context, multi-turn same-task | thinking high |
+| `standard` | code blocks, multi-file paths, diffs, implementation phrasing, long/epic context | thinking medium |
+| `complex` | refactor/migration/architecture keywords, multi-turn same-task | thinking high |
 
 > **Split analysis**: the prompt is split into a phase sequence by phase conjunctions (`并/然后/接着/随后/再`, `and/then`) and sentence boundaries, and **the first phase sets the tier** — later phases are classified when their own turn arrives, so the tier flows with the phases. "帮我设计并实现一个登录功能" starts with design → complex (the build turn lands standard later: complex→standard); "实现支付逻辑，然后设计对账方案" starts with the build → standard (the design turn escalates: standard→complex); "按设计方案实现支付逻辑" is a single phase building on an existing plan → standard. Hard scope words (`重构/迁移/架构/跨文件`, `refactor/migrate/rewrite`) only count inside the first phase.
 >
@@ -394,7 +452,9 @@ Tiering is decided by **weighted signal scoring** (argmax + confidence ≥ 0.45 
 
 #### → `complex` (weight 5, the only signal that pins complex directly)
 
-Any **multi-step word** hit pushes complex; or `@reasoning` pinning; or context ≥ 100k tokens (epic).
+Any **multi-step word** hit pushes complex; or `@reasoning` pinning.
+
+> Context ≥ 100k tokens (epic) no longer pins complex by itself: context length picks a model's **window** (capability), not its reasoning tier. An epic context auto-derives a `minContextWindow` requirement (same as `@long`'s `max(100k, estimate)`) and caps the classifier tier at `standard`; a short general Q&A (prompt < 200 tokens) suppresses the context-size signal entirely — "你是谁" at 150k context still lands trivial. If no candidate in the resolved tier fits the window, routing escalates to the nearest higher tier (see below).
 
 **Multi-step words — substring match (includes Chinese)**
 ```
@@ -438,7 +498,7 @@ Any of these strong signals, with no multi-step word claiming complex:
   develop develops developing
   ```
 - code / analysis intent (intent words like `实现`, `analyze`, `分析`) without structural signals
-- context 32k–100k tokens (long)
+- context 32k–100k tokens (long); ≥ 100k tokens (epic) also caps here
 - pinning: `@swe`
 
 #### → `simple`
@@ -450,7 +510,7 @@ Any of these strong signals, with no multi-step word claiming complex:
 
 #### → `trivial`
 
-- short general Q&A (estimated < 200 tokens, no code/repair/image signals)
+- short general Q&A (**prompt** estimate < 200 tokens, no code/repair/image signals) — the context-size signal is suppressed; window fit is delegated to the `minContextWindow` capability requirement
 - context < 4k tokens (short)
 - no dedicated pinning token (`@fast` lands on simple, already one of the lowest tiers)
 
@@ -464,6 +524,8 @@ Any of these strong signals, with no multi-step word claiming complex:
 
 > Wordlist sources: `src/core/complexity-classifier.ts` (multi-step/repair), `src/core/intent-classifier.ts` (intent), `src/core/context-analyzer.ts` (context bands), `src/core/shortcut-parser.ts` (pinning tokens). Wordlists are tunable; changes don't affect routing logic.
 
+> **Context-window fallback**: an epic context (estimated ≥ 100k tokens) automatically adds a `minContextWindow ≥ estimate` requirement to the request, same as `@long`. If no candidate in the resolved tier fits the window, routing escalates to the nearest higher tier (the same mechanism as the reasoning guarantee) instead of jumping straight to complex — e.g. a 60k-window trivial-tier model with a 150k context escalates to a standard tier whose models fit.
+
 ## Commands
 
 | Command | Description | Example |
@@ -473,7 +535,7 @@ Any of these strong signals, with no multi-step word claiming complex:
 | `/auto-router use <profile\|alias>` | switch profile (persisted; survives resume/branch) | `/auto-router use economy` |
 | `/auto-router list` / `show <profile>` | current profile's tier chain / profile details | `/auto-router show premium` |
 | `/auto-router explain` | full reasoning chain of the last decision (including host-available quota data) | `/auto-router explain` |
-| `/auto-router doctor` | host capability diagnostics + configuration errors (omp: H1–H7; Pi: Mode A/trust/UVI) | `/auto-router doctor` |
+| `/auto-router doctor` | host capability diagnostics + configuration errors (omp: H1–H7; Pi: delegation/trust/UVI) | `/auto-router doctor` |
 | `/auto-router reload` | re-read auto-router.yml | `/auto-router reload` |
 | `/auto-router budget show\|set <p> <usd> [monthly]\|clear <p>` | budget management (warn 80% / block 100%) | `/auto-router budget set google 20 monthly` |
 | `/auto-router uvi show\|enable\|disable\|refresh` | usage-report quota pacing; Pi explicitly reports it unavailable for every action | `/auto-router uvi show` |

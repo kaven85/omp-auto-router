@@ -1,6 +1,20 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { addTarget, baseModel, bootHarness, createPiHarness, type PiHarness } from "./mock-pi";
+
+// llmAdjudicationEnabled() reads process.env live per request — scrub the
+// developer shell's ambient override so it cannot flip test outcomes.
+const ADJUDICATE_ENV_KEYS = ["AUTO_ROUTER_LLM_ADJUDICATE", "OMP_AUTO_ROUTER_LLM_ADJUDICATE", "PI_AUTO_ROUTER_LLM_ADJUDICATE"] as const;
+const ambientAdjudicateEnv = ADJUDICATE_ENV_KEYS.map((key) => [key, process.env[key]] as const);
+beforeEach(() => {
+	for (const key of ADJUDICATE_ENV_KEYS) delete process.env[key];
+});
+afterAll(() => {
+	for (const [key, value] of ambientAdjudicateEnv) {
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
+});
 
 const TWO_TARGET_CONFIG = `
 active: work

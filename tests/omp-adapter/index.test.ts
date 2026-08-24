@@ -97,6 +97,30 @@ describe("extension entry (boot + ctx adoption)", () => {
 		);
 	});
 
+	test("reload defers profile or role catalog changes until OMP restarts", async () => {
+		await withAgentDir(BASE_CONFIG, async (dir) => {
+			const api = new MockExtensionApi();
+			api.models = MODELS;
+			autoRouterExtension(api);
+			const notices: string[] = [];
+			const ctx = api.makeCtx({
+				ui: { hasUI: true, notify: (message) => notices.push(message), setStatus: () => {} },
+			});
+			await api.fire("session_start", ctx);
+			await flushBoot();
+			writeFileSync(join(dir, "auto-router.yml"), `${BASE_CONFIG}\n  added:\n    tiers:\n      standard: { targets: [{ provider: anthropic, model: sonnet }] }\n`);
+			await api.commands.get("auto-router")!.handler("reload", ctx);
+			expect(notices.at(-1)).toContain("virtual model catalog changed; restart OMP");
+			// The original, actually registered model remains routable.
+			const events: string[] = [];
+			for await (const event of api.providers.get("auto-router")!.streamSimple!({ provider: "auto-router", id: "main", api: "auto-router" }, { messages: [] }, {})) {
+				events.push(event.type);
+			}
+			expect(events).toEqual(["done"]);
+		});
+	});
+
+
 	test("a subagent session_start (hasUI:false) does not clobber the main ctx", async () => {
 		await withAgentDir(BASE_CONFIG, async () => {
 			const api = new MockExtensionApi();
@@ -269,7 +293,7 @@ describe("background quota refresh", () => {
 
 			await refreshQuotaAndRender({ current: state }, api);
 			expect(state.quotaCache.data).toHaveLength(1);
-			expect(widgetCalls).toEqual([["main | tier=standard | anthropic/sonnet", "uvi: anthropic 75% left"]]);
+			expect(widgetCalls).toEqual([["main | tier=常规开发 (standard) | anthropic/sonnet", "uvi: anthropic 75% left"]]);
 
 			// Same data → no redundant widget render.
 			await refreshQuotaAndRender({ current: state }, api);
@@ -279,7 +303,7 @@ describe("background quota refresh", () => {
 			usedFraction = 0.5;
 			await refreshQuotaAndRender({ current: state }, api);
 			expect(widgetCalls).toHaveLength(2);
-			expect(widgetCalls[1]).toEqual(["main | tier=standard | anthropic/sonnet", "uvi: anthropic 50% left"]);
+			expect(widgetCalls[1]).toEqual(["main | tier=常规开发 (standard) | anthropic/sonnet", "uvi: anthropic 50% left"]);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

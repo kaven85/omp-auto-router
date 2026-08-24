@@ -17,7 +17,6 @@ function input(overrides: Partial<ClassifyComplexityInput>): ClassifyComplexityI
 		prompt: "hello",
 		estimatedTokens: 10,
 		hasImages: false,
-		conversationDepth: 0,
 		...overrides,
 	};
 }
@@ -36,10 +35,13 @@ describe("classifyComplexity — base tiers", () => {
 		expect(result.signals.stickyEscalation).toBe(false);
 	});
 
-	test("medium context reaches at least simple", () => {
+	test("short general Q&A stays trivial even at medium context", () => {
+		// A short prompt is classified by the prompt alone: context length
+		// picks the model's window (capability), not its reasoning tier.
 		const result = classifyComplexity(input({ estimatedTokens: 10_000, intent: GENERAL_INTENT }));
-		expect(result.tier).toBe("simple");
-		expect(result.signals.shortQa).toBe(false);
+		expect(result.tier).toBe("trivial");
+		expect(result.signals.shortQa).toBe(true);
+		expect(result.reasons.join(" ")).toContain("suppressed");
 	});
 
 	test("image input reaches at least simple", () => {
@@ -166,16 +168,20 @@ describe("classifyComplexity — base tiers", () => {
 		expect(result.tier).toBe("standard");
 	});
 
-	test("quant strategy phrasing reaches complex", () => {
+	test("general multi-step phrasing reaches complex; domain jargon alone does not", () => {
+		// General planning vocabulary still fires regardless of domain.
 		for (const prompt of [
 			"帮我设计一个量化策略并回测",
-			"对这个行业做全市场筛选",
 			"run a backtest on the momentum strategy",
 		]) {
 			const result = classifyComplexity(input({ prompt, intent: CODE_INTENT }));
 			expect(result.tier).toBe("complex");
 			expect(result.signals.multiStep).toBe(true);
 		}
+		// Domain-specific jargon carries no builtin weight — user vocabulary
+		// belongs in `/auto-router rules add` overrides, not the core lists.
+		const jargon = classifyComplexity(input({ prompt: "对这个行业做全市场筛选", intent: CODE_INTENT }));
+		expect(jargon.signals.multiStep).toBe(false);
 	});
 
 	test("shortcut @fast overrides the code-intent escalation", () => {
@@ -189,8 +195,22 @@ describe("classifyComplexity — base tiers", () => {
 		expect(classifyComplexity(input({ estimatedTokens: 50_000 })).tier).toBe("standard");
 	});
 
-	test("epic context reaches complex", () => {
-		expect(classifyComplexity(input({ estimatedTokens: 150_000 })).tier).toBe("complex");
+	test("epic context caps at standard, not complex", () => {
+		// A big context needs a big window, not a harder task — multi-step
+		// phrasing (weight 5) is the only path to complex.
+		expect(classifyComplexity(input({ estimatedTokens: 150_000 })).tier).toBe("standard");
+	});
+
+	test("short general Q&A at epic context stays trivial", () => {
+		// Regression: "你是谁" at 150k session context used to hit complex
+		// (epic context weight 3) and route to the top model. A trivial
+		// prompt stays trivial; the window fit is enforced by the pipeline's
+		// minContextWindow requirement instead.
+		const result = classifyComplexity(input({ estimatedTokens: 150_000, intent: GENERAL_INTENT }));
+		expect(result.tier).toBe("trivial");
+		expect(result.signals.shortQa).toBe(true);
+		expect(result.signals.multiStep).toBe(false);
+		expect(result.reasons.join(" ")).toContain("suppressed");
 	});
 
 	test("English multi-step keywords reach complex", () => {
@@ -294,6 +314,24 @@ describe("classifyComplexity — implementation phrasing", () => {
 			expect(result.tier, prompt).toBe("complex");
 			expect(result.signals.multiStep, prompt).toBe(true);
 		}
+	});
+
+	test("background-only opening phase does not mask the task phase", () => {
+		// Context-first prompts open with a phase that carries no task
+		// phrasing at all ("我们有一个运行了 8 年的单体应用。"). The phase
+		// split must skip it: the task phase behind it drives the tier.
+		// Regression: the background sentence used to win the split and pin
+		// an architecture-migration ask to standard.
+		const result = classifyComplexity(
+			input({
+				prompt:
+					"我们有一个运行了 8 年的单体 Java 应用（订单 + 库存 + 支付耦合在一个 WAR 里，共享一张 MySQL）。\n" +
+					"请设计并落地一次架构迁移：把单体按领域拆成三个微服务，给出数据迁移与回滚策略。",
+				intent: CODE_INTENT,
+			}),
+		);
+		expect(result.tier).toBe("complex");
+		expect(result.signals.multiStep).toBe(true);
 	});
 
 	test("hard scope words only count in the current task", () => {
@@ -431,7 +469,7 @@ describe("classifyComplexity — sticky escalation", () => {
 		const result = classifyComplexity(
 			input({ priorTier: "simple", estimatedTokens: 150_000 }),
 		);
-		expect(result.tier).toBe("complex");
+		expect(result.tier).toBe("standard");
 		expect(result.signals.stickyEscalation).toBe(false);
 	});
 

@@ -50,7 +50,6 @@ describe("Pi command group (shared implementation)", () => {
 		const h = await boot();
 		await h.invoke("status");
 		expect(output(h)).toContain("profile: premium");
-		expect(output(h)).toContain("mode: A");
 		await h.invoke("profiles");
 		expect(output(h)).toContain("▶ premium");
 		expect(output(h)).toContain(" economy");
@@ -79,9 +78,9 @@ describe("Pi command group (shared implementation)", () => {
 	test("list/show/explain render chains and reasoning", async () => {
 		const h = await boot();
 		await h.invoke("list");
-		expect(output(h)).toContain("standard (thinking=medium): alpha/a1, beta/b1");
+		expect(output(h)).toContain("常规开发 (standard) (thinking=medium): alpha/a1, beta/b1");
 		await h.invoke("show premium");
-		expect(output(h)).toContain("defaultTier: standard");
+		expect(output(h)).toContain("defaultTier: 常规开发 (standard)");
 		expect(output(h)).toContain("budgets:");
 		expect(output(h)).toContain("alpha: $10 monthly");
 		await h.invoke("explain");
@@ -126,7 +125,6 @@ describe("Pi command group (shared implementation)", () => {
 		expect(out).toContain("auto-router doctor (Pi)");
 		expect(out).toContain("✅ required — public ModelRegistry");
 		expect(out).toContain("⚠️ optional — UVI usage reports unavailable");
-		expect(out).toContain("mode: A");
 	});
 
 	test("rules edits persist to the state directory and affect later reads", async () => {
@@ -177,7 +175,7 @@ describe("Pi command group (shared implementation)", () => {
 		};
 		await h.stream("premium", "plain prompt");
 		expect(widgets.length).toBeGreaterThan(0);
-		expect(widgets.at(-1)?.[0]).toMatch(/^premium \| tier=\w+ \| alpha\/a1/);
+		expect(widgets.at(-1)?.[0]).toMatch(/^premium \| tier=.+ \| alpha\/a1/);
 		expect(widgets.at(-1)?.some((line) => line.startsWith("budgets: alpha"))).toBe(true);
 		// No UVI lines may appear — Pi has no quota reports to render.
 		expect(widgets.at(-1)?.some((line) => line.startsWith("uvi:"))).toBe(false);

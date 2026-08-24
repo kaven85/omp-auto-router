@@ -113,6 +113,7 @@ function createHost(state: RouterRuntimeState, overrides: Partial<RouterCommandH
 function decisionFixture(profile = "premium"): RoutingDecision {
 	return {
 		profile,
+		role: "default",
 		tier: "standard",
 		confidence: 0.9,
 		target: { provider: "anthropic", model: "sonnet" },
@@ -147,8 +148,7 @@ describe("shared router commands", () => {
 		const host = createHost(state);
 		await runRouterCommand("status", state, host);
 		expect(output(host)).toContain("profile: premium (订阅优先)");
-		expect(output(host)).toContain("last: standard → anthropic/sonnet (thinking=medium)");
-		expect(output(host)).toContain("mode: A");
+		expect(output(host)).toContain("last: 常规开发 (standard) → anthropic/sonnet (thinking=medium)");
 	});
 
 	test("profiles marks the active profile and lists the rest", async () => {
@@ -162,6 +162,15 @@ describe("shared router commands", () => {
 	test("host virtual model wins over registry default for the active profile", async () => {
 		const state = createState();
 		const host = createHost(state, { activeVirtualProfile: () => "economy" });
+		await runRouterCommand("current", state, host);
+		expect(output(host)).toBe("economy");
+	});
+
+	test("role-scoped virtual model id resolves to its profile", async () => {
+		const state = createState();
+		// economy differs from the registry default (premium): an exact-match
+		// lookup would reject "economy/task" and wrongly fall back to premium.
+		const host = createHost(state, { activeVirtualProfile: () => "economy/task" });
 		await runRouterCommand("current", state, host);
 		expect(output(host)).toBe("economy");
 	});
@@ -193,7 +202,7 @@ describe("shared router commands", () => {
 		const state = createState();
 		const host = createHost(state);
 		await runRouterCommand("list", state, host);
-		expect(output(host)).toContain("standard (thinking=medium): anthropic/sonnet, deepseek/flash");
+		expect(output(host)).toContain("常规开发 (standard) (thinking=medium): anthropic/sonnet, deepseek/flash");
 		await runRouterCommand("show economy", state, host);
 		expect(output(host)).toContain("economy — 省钱");
 		expect(output(host)).toContain("- deepseek/flash (per-token)");
@@ -207,7 +216,7 @@ describe("shared router commands", () => {
 		state.ratings.rate({ rating: "good", provider: "anthropic", model: "sonnet", profile: "premium", tier: "standard" });
 		const host = createHost(state);
 		await runRouterCommand("explain", state, host);
-		expect(output(host)).toContain("profile=premium tier=standard (conf 0.90)");
+		expect(output(host)).toContain("profile=premium role=default tier=常规开发 (standard) (conf 0.90)");
 		expect(output(host)).toContain("target: anthropic/sonnet");
 		expect(output(host)).toContain("chain: anthropic/sonnet → deepseek/flash");
 		expect(output(host)).toContain("tokens≈42");
@@ -224,7 +233,6 @@ describe("shared router commands", () => {
 		expect(output(host)).toContain("config errors: broken.yml: bad profile");
 		expect(output(host)).toContain("❌ R1 — required capability missing");
 		expect(output(host)).toContain("⚠️ UVI unavailable");
-		expect(output(host)).toContain("mode: A");
 	});
 
 	test("reload delegates to the host and reports warnings", async () => {

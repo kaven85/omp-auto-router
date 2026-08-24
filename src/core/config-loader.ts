@@ -22,6 +22,7 @@ import {
 	type PolicyRuleConfig,
 	type PolicyRuleType,
 	type ProfileConfig,
+	type RoleConfig,
 	type RouteTarget,
 	type RouterConfig,
 	type ThinkingCap,
@@ -304,6 +305,67 @@ function parseRule(raw: unknown, path: string, errors: string[]): PolicyRuleConf
 	return ok ? rule : undefined;
 }
 
+const TIER_RANKS: Record<string, number> = { trivial: 0, simple: 1, standard: 2, complex: 3 };
+
+/**
+ * Role names land inside virtual model ids (`<profile>/<role>`), so they must
+ * be single safe segments. Unknown-to-omp names are allowed (forward-compat
+ * with new host roles); undeclared roles simply route as "default".
+ */
+function isValidRoleName(name: string): boolean {
+	return /^[a-z0-9][a-z0-9-]*$/.test(name);
+}
+
+function parseRoleConfig(raw: unknown, path: string, errors: string[]): RoleConfig | undefined {
+	if (!isRecord(raw)) {
+		errors.push(`${path}: expected a mapping (targets chain or tierFloor/tierCap clamps)`);
+		return undefined;
+	}
+	const role: RoleConfig = {};
+	if (raw.thinking !== undefined) {
+		if (oneOf(raw.thinking, THINKING_LEVELS)) role.thinking = raw.thinking;
+		else errors.push(`${path}.thinking: must be one of ${joinOptions(THINKING_LEVELS)}`);
+	}
+	if (raw.targets !== undefined) {
+		if (raw.tierFloor !== undefined || raw.tierCap !== undefined) {
+			errors.push(`${path}: targets (fixed chain) is mutually exclusive with tierFloor/tierCap`);
+			return undefined;
+		}
+		if (!Array.isArray(raw.targets) || raw.targets.length === 0) {
+			errors.push(`${path}.targets: required (non-empty array of route targets)`);
+			return undefined;
+		}
+		const targets: RouteTarget[] = [];
+		raw.targets.forEach((t, i) => {
+			const parsed = parseRouteTarget(t, `${path}.targets[${i}]`, errors);
+			if (parsed !== undefined) targets.push(parsed);
+		});
+		role.targets = targets;
+		return role;
+	}
+	if (raw.tierFloor !== undefined) {
+		if (oneOf(raw.tierFloor, COMPLEXITY_TIERS)) role.tierFloor = raw.tierFloor;
+		else errors.push(`${path}.tierFloor: must be one of ${joinOptions(COMPLEXITY_TIERS)}`);
+	}
+	if (raw.tierCap !== undefined) {
+		if (oneOf(raw.tierCap, COMPLEXITY_TIERS)) role.tierCap = raw.tierCap;
+		else errors.push(`${path}.tierCap: must be one of ${joinOptions(COMPLEXITY_TIERS)}`);
+	}
+	if (
+		role.tierFloor !== undefined &&
+		role.tierCap !== undefined &&
+		(TIER_RANKS[role.tierFloor] ?? 0) > (TIER_RANKS[role.tierCap] ?? 0)
+	) {
+		errors.push(`${path}: tierFloor (${role.tierFloor}) must not rank above tierCap (${role.tierCap})`);
+		return undefined;
+	}
+	if (role.tierFloor === undefined && role.tierCap === undefined && role.thinking === undefined) {
+		errors.push(`${path}: empty role config — declare targets, tierFloor/tierCap, or thinking`);
+		return undefined;
+	}
+	return role;
+}
+
 function parseProfile(raw: unknown, path: string, errors: string[]): ProfileConfig | undefined {
 	if (!isRecord(raw)) {
 		errors.push(`${path}: expected a mapping`);
@@ -331,6 +393,28 @@ function parseProfile(raw: unknown, path: string, errors: string[]): ProfileConf
 			}
 			const tier = parseTierConfig(tierRaw, tierPath, errors);
 			if (tier !== undefined) profile.tiers[tierName] = tier;
+		}
+	}
+	if (raw.roles !== undefined) {
+		if (!isRecord(raw.roles)) {
+			errors.push(`${path}.roles: expected a mapping of role name → role config`);
+		} else {
+			const roles: Record<string, RoleConfig> = {};
+			for (const [roleName, roleRaw] of Object.entries(raw.roles)) {
+				if (isUnsafeKey(roleName)) {
+					errors.push(`${path}.roles.${roleName}: unsafe key "${roleName}" rejected`);
+					continue;
+				}
+				if (!isValidRoleName(roleName)) {
+					errors.push(
+						`${path}.roles.${roleName}: invalid role name (lowercase letters/digits/dashes, no "/")`,
+					);
+					continue;
+				}
+				const parsed = parseRoleConfig(roleRaw, `${path}.roles.${roleName}`, errors);
+				if (parsed !== undefined) roles[roleName] = parsed;
+			}
+			profile.roles = roles;
 		}
 	}
 	if (raw.budgets !== undefined) {
@@ -401,6 +485,13 @@ export function parseRouterConfig(yamlText: string): ConfigLoadResult {
 		for (const [name, profileRaw] of Object.entries(raw.profiles)) {
 			if (isUnsafeKey(name)) {
 				errors.push(`profiles.${name}: unsafe key "${name}" rejected`);
+				continue;
+			}
+			// Profile ids occupy the first segment of virtual model ids
+			// (`<profile>/<role>`). A slash would make a profile collide with a
+			// role-scoped model and make that role impossible to address.
+			if (!isNonEmptyString(name) || name.includes("/")) {
+				errors.push(`profiles.${name}: invalid profile name (non-empty and must not contain "/")`);
 				continue;
 			}
 			const parsed = parseProfile(profileRaw, `profiles.${name}`, errors);
@@ -513,6 +604,37 @@ export async function loadRouterConfigFile(path: string): Promise<ConfigLoadResu
 		return { errors: [`${path}: failed to read file: ${message}`] };
 	}
 	return parseRouterConfig(text);
+}
+
+/**
+ * Remove every `balanceEndpoint` override from a config layer, across tier
+ * targets AND fixed-role targets. Project-layer configs are less trusted
+ * than the user config: a balance endpoint receives the provider's Bearer
+ * credential, so honoring a project-supplied URL would exfiltrate it.
+ * Returns the number of overrides removed.
+ */
+export function stripBalanceEndpointOverrides(config: RouterConfig): number {
+	let removed = 0;
+	for (const profile of Object.values(config.profiles)) {
+		for (const tier of Object.values(profile.tiers)) {
+			if (!tier) continue;
+			for (const target of tier.targets) {
+				if (target.balanceEndpoint !== undefined) {
+					delete target.balanceEndpoint;
+					removed++;
+				}
+			}
+		}
+		for (const role of Object.values(profile.roles ?? {})) {
+			for (const target of role?.targets ?? []) {
+				if (target.balanceEndpoint !== undefined) {
+					delete target.balanceEndpoint;
+					removed++;
+				}
+			}
+		}
+	}
+	return removed;
 }
 
 function isNotFoundError(err: unknown): boolean {

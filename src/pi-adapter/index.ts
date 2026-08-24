@@ -1,21 +1,29 @@
 import { createAssistantMessageEventStream, type Api, type AssistantMessageEvent, type Context, type Model, type SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import type { CandidateInfo, RouteTarget, RoutingDecision, StreamEventLike } from "../core/types";
-import { buildAdjudicationPrompt, parseAdjudicationResponse } from "../core/llm-adjudication";
-import { matchPathActivation } from "../runtime/activation";
+import type { CandidateInfo, StreamEventLike } from "../core/types";
+import { buildAdjudicationPrompt, parseAdjudicationResponse, ADJUDICATION_MAX_CHARS, ADJUDICATION_TIMEOUT_MS } from "../core/llm-adjudication";
+import { matchPathActivation } from "../core/profile-registry";
+import {
+	buildVirtualModels,
+	configuredTargets,
+	decisionEntries,
+	recordTestOutcome,
+	refreshSettledBalanceAndWidget,
+	routerErrorEvent,
+	ROUTER_PROVIDER_ID,
+	TEST_COMMAND_RE,
+	VIRTUAL_API_KEY,
+	VIRTUAL_BASE_URL,
+} from "../runtime/adapter-kit";
 import { buildRouterCompletions, runRouterCommand, type RouterCommandHost } from "../runtime/commands";
 import { loadInitialRouterConfiguration, loadRouterConfiguration, projectConfigPath, userConfigPath } from "../runtime/config";
-import { parseProviderBalance, resolveBalanceEndpoint } from "../runtime/provider-dictionary";
-import { ROUTER_DECISION_ENTRY, LEGACY_OMP_DECISION_ENTRY, RouterRuntime, RouterRuntimeError, type RouterRuntimeHost } from "../runtime/router-runtime";
-import { createPersistentRuntimeState, persistRuntimeTrackers, type PersistentRuntimeState } from "../runtime/state";
-import { renderRouterWidget } from "../runtime/widget";
-import { delegatePiTarget, inspectPiModeACapabilities } from "./delegated-stream";
+import { parseProviderBalance } from "../runtime/provider-dictionary";
+import { RouterRuntime, RouterRuntimeError, type RouterRuntimeHost } from "../runtime/router-runtime";
+import { createPersistentRuntimeState, persistClassifierOverrides, persistRuntimeTrackers, type PersistentRuntimeState } from "../runtime/state";
+import { delegatePiTarget, inspectPiDelegationCapabilities } from "./delegated-stream";
 import { toPiPublicModelRegistry } from "./public-registry";
 
-const PROVIDER_ID = "auto-router";
-const VIRTUAL_API_KEY = "AUTO_ROUTER_VIRTUAL_KEY";
-const VIRTUAL_BASE_URL = "http://127.0.0.1:0";
 /** Host-neutral, versioned custom entry types (legacy OMP entries are read back too). */
 const PROFILE_STATE_ENTRY = "com.auto-router.v1.state";
 
@@ -30,20 +38,12 @@ export default function piAutoRouterExtension(pi: ExtensionAPI): void {
 
 	const registerProfiles = (): void => {
 		const state = stateRef.current;
-		pi.registerProvider(PROVIDER_ID, {
+		pi.registerProvider(ROUTER_PROVIDER_ID, {
 			name: "Auto Router",
 			baseUrl: VIRTUAL_BASE_URL,
 			apiKey: VIRTUAL_API_KEY,
 			api: "openai-completions",
-			models: Object.keys(state.config.profiles).map((id) => ({
-				id,
-				name: `Auto Router: ${id}`,
-				reasoning: true,
-				input: ["text", "image"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 200_000,
-				maxTokens: 16_384,
-			})),
+			models: buildVirtualModels(state.config.profiles),
 			streamSimple(model, streamContext, options) {
 				return bridgeRuntimeStream(stateRef.current, context, pi, model, streamContext, options);
 			},
@@ -92,10 +92,8 @@ export default function piAutoRouterExtension(pi: ExtensionAPI): void {
 	pi.on("tool_result", (event) => {
 		if (event.toolName !== "bash") return;
 		const command = typeof event.input.command === "string" ? event.input.command : "";
-		if (/\b(?:bun|npm|pnpm|yarn)\s+(?:run\s+)?(?:test|build)\b|\b(?:vitest|jest|pytest|go\s+test|cargo\s+test)\b|\btsc\b/.test(command)) {
-			stateRef.current.testFailureAt = event.isError ? Date.now() : undefined;
-			stateRef.current.eventLog.append({ type: event.isError ? "error" : "decision", at: Date.now(), what: event.isError ? "test-failure" : "test-pass" });
-		}
+		if (!TEST_COMMAND_RE.test(command)) return;
+		recordTestOutcome(stateRef.current, command, event.isError === true);
 	});
 }
 
@@ -111,9 +109,11 @@ function bridgeRuntimeStream(
 	void (async () => {
 		try {
 			if (!context) throw new RouterRuntimeError("Pi session has not started; retry after session initialization");
+			const { profile: profileName, role } = state.registry.parseVirtualModelId(virtualModel.id);
 			const runtime = new RouterRuntime(state, createPiRuntimeHost(context, pi));
 			for await (const event of runtime.stream({
-				profile: virtualModel.id,
+				profile: profileName,
+				role,
 				context: streamContext,
 				options: options as Record<string, unknown> | undefined,
 				estimatedTokens: context.getContextUsage()?.tokens ?? undefined,
@@ -125,19 +125,14 @@ function bridgeRuntimeStream(
 		}
 		// Post-stream visibility: refresh the settled provider's prepaid balance
 		// (public authenticated auth, no host usage reports involved) and render
-		// the shared widget. Best-effort — failures never break the turn.
-		const decision = state.lastDecision?.decision;
-		if (decision && context) {
-			try {
-				const endpoint = resolveBalanceEndpoint(decision.target.provider, configuredTargets(state));
-				if (endpoint) {
-					const balance = await fetchPiBalance(context, decision.target.provider, endpoint);
-					if (balance) (state.balanceCache ??= {})[decision.target.provider] = balance;
-				}
-				renderRouterWidget(state, (lines) => setPiWidget(context, lines), decision);
-			} catch {
-				// headless/UI-less contexts tolerate absent widget surfaces
-			}
+		// the shared widget.
+		if (context) {
+			await refreshSettledBalanceAndWidget(
+				state,
+				configuredTargets(state.registry),
+				(provider, endpoint) => fetchPiBalance(context, provider, endpoint),
+				(lines) => setPiWidget(context, lines),
+			);
 		}
 	})();
 	return output;
@@ -152,7 +147,7 @@ function createPiRuntimeHost(context: ExtensionContext, pi: ExtensionAPI): Route
 			const candidates: CandidateInfo[] = [];
 			for (const target of targets) {
 				const key = `${target.provider}/${target.model}`;
-				const model = target.provider === PROVIDER_ID || (allowed && !allowed.has(key))
+				const model = target.provider === ROUTER_PROVIDER_ID || (allowed && !allowed.has(key))
 					? undefined
 					: context.modelRegistry.find(target.provider, target.model);
 				const auth = model ? await context.modelRegistry.getApiKeyAndHeaders(model) : undefined;
@@ -201,7 +196,7 @@ function createPiRuntimeHost(context: ExtensionContext, pi: ExtensionAPI): Route
 			const model = context.modelRegistry.find(target.provider, target.model);
 			if (!model) return undefined;
 			try {
-				const timeout = AbortSignal.timeout(15_000);
+				const timeout = AbortSignal.timeout(ADJUDICATION_TIMEOUT_MS);
 				const reply = await context.modelRegistry.complete(model, {
 					messages: [{ role: "user", content: [{ type: "text", text: buildAdjudicationPrompt(prompt) }] }],
 				} as Context, { ...(signal !== undefined ? { signal: AbortSignal.any([signal, timeout]) } : { signal: timeout }) });
@@ -209,7 +204,7 @@ function createPiRuntimeHost(context: ExtensionContext, pi: ExtensionAPI): Route
 					.filter((part) => part.type === "text")
 					.map((part) => ("text" in part ? part.text : ""))
 					.join("")
-					.slice(0, 4_096);
+					.slice(0, ADJUDICATION_MAX_CHARS);
 				const tier = parseAdjudicationResponse(text);
 				return tier === undefined ? undefined : { tier, model: `${target.provider}/${target.model}` };
 			} catch {
@@ -245,10 +240,10 @@ function createPiCommandHost(
 		},
 		activeVirtualProfile() {
 			const model = context.model;
-			return model?.provider === PROVIDER_ID ? model.id : undefined;
+			return model?.provider === ROUTER_PROVIDER_ID ? model.id : undefined;
 		},
 		async setVirtualProfile(name) {
-			const model = context.modelRegistry.find(PROVIDER_ID, name);
+			const model = context.modelRegistry.find(ROUTER_PROVIDER_ID, name);
 			if (!model) return false;
 			return pi.setModel(model);
 		},
@@ -266,10 +261,10 @@ function createPiCommandHost(
 			return loaded.errors;
 		},
 		doctorLines() {
-			const capability = inspectPiModeACapabilities(toPiPublicModelRegistry(context.modelRegistry));
+			const capability = inspectPiDelegationCapabilities(toPiPublicModelRegistry(context.modelRegistry));
 			return [
 				capability.supported
-					? "✅ required — public ModelRegistry find/getProvider/getApiKeyAndHeaders (Mode A delegation)"
+					? "✅ required — public ModelRegistry find/getProvider/getApiKeyAndHeaders (stream delegation)"
 					: `❌ required — missing public capability: ${capability.missing.join(", ")}`,
 				"⚠️ optional — UVI usage reports unavailable through Pi public interface; local budgets, balances, ratings and failover remain enabled",
 				context.isProjectTrusted()
@@ -280,7 +275,7 @@ function createPiCommandHost(
 		quotaAvailable: () => false,
 		fetchBalance: (provider, endpoint) => fetchPiBalance(context, provider, endpoint),
 		persistClassifierOverrides() {
-			stateRef.current.stateStore.writeJson("classifier-rules.json", stateRef.current.classifierOverrides ?? {});
+			persistClassifierOverrides(stateRef.current);
 		},
 	};
 }
@@ -328,17 +323,8 @@ function modelCapabilities(model: Model<Api>) {
 	};
 }
 
-function configuredTargets(state: PersistentRuntimeState): RouteTarget[] {	return Object.values(state.config.profiles).flatMap((profile) =>
-		Object.values(profile.tiers).flatMap((tier) => tier?.targets ?? []),
-	);
-}
-
 function restoreDecisions(state: PersistentRuntimeState, context: ExtensionContext): void {
-	const decisions = context.sessionManager.getBranch()
-		.filter((entry): entry is Extract<typeof entry, { type: "custom" }> => entry.type === "custom")
-		.filter((entry) => entry.customType === ROUTER_DECISION_ENTRY || entry.customType === LEGACY_OMP_DECISION_ENTRY)
-		.map((entry) => entry.data)
-		.filter((value): value is RoutingDecision => Boolean(value && typeof value === "object"));
+	const decisions = decisionEntries(context.sessionManager.getBranch());
 	state.decisions.restore(decisions);
 	const decision = decisions.at(-1);
 	if (decision) state.lastDecision = { at: decision.decidedAt, decision, cleanPrompt: "" };
@@ -348,8 +334,13 @@ async function activatePathProfile(state: PersistentRuntimeState, context: Exten
 	const pathProfile = matchPathActivation(state.config, context.cwd);
 	if (!pathProfile) return;
 	const activeModel = context.model;
-	if (activeModel?.provider === PROVIDER_ID && activeModel.id === pathProfile) return;
-	const model = context.modelRegistry.find(PROVIDER_ID, pathProfile);
+	// A role-scoped virtual model (`<profile>/<role>`) of the activated
+	// profile already satisfies the activation — don't reset its role.
+	if (
+		activeModel?.provider === ROUTER_PROVIDER_ID &&
+		state.registry.parseVirtualModelId(activeModel.id).profile === pathProfile
+	) return;
+	const model = context.modelRegistry.find(ROUTER_PROVIDER_ID, pathProfile);
 	if (model && await pi.setModel(model)) {
 		state.registry.switch(pathProfile);
 		pi.appendEntry(PROFILE_STATE_ENTRY, { profile: pathProfile });
@@ -358,18 +349,5 @@ async function activatePathProfile(state: PersistentRuntimeState, context: Exten
 }
 
 function errorEvent(model: Model<Api>, error: unknown): AssistantMessageEvent {
-	return {
-		type: "error",
-		reason: "error",
-		error: {
-			role: "assistant",
-			content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-			stopReason: "error",
-			timestamp: Date.now(),
-		},
-	};
+	return routerErrorEvent(model, error instanceof Error ? error.message : String(error)) as AssistantMessageEvent;
 }

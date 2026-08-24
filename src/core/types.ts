@@ -12,6 +12,21 @@
 
 export const COMPLEXITY_TIERS = ["trivial", "simple", "standard", "complex"] as const;
 export type ComplexityTier = (typeof COMPLEXITY_TIERS)[number];
+/**
+ * Human-facing names. YAML and persisted decisions keep stable tier keys.
+ * `formatComplexityTier` is the sole UI translation point.
+ */
+export const COMPLEXITY_TIER_LABELS: Record<ComplexityTier, string> = {
+	trivial: "问答",
+	simple: "轻任务",
+	standard: "常规开发",
+	complex: "深度工程",
+};
+
+export function formatComplexityTier(tier: ComplexityTier): string {
+	return `${COMPLEXITY_TIER_LABELS[tier]} (${tier})`;
+}
+
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
@@ -92,11 +107,33 @@ export interface PolicyRuleConfig {
 	constraint?: Partial<CapabilityRequirement>;
 }
 
+/**
+ * Per-role routing inside a profile (omp `modelRoles` → `auto-router/<profile>/<role>`).
+ * Two forms, mutually exclusive:
+ * - fixed chain: `targets` set → skip classification, route this role through
+ *   the chain in order (failover applies). `tierFloor`/`tierCap` rejected.
+ * - clamped: no `targets` → classify on the profile's tiers, then clamp the
+ *   resolved tier into [tierFloor, tierCap].
+ * Shortcut tier pins (@fast/@swe/@reasoning) always escape both forms.
+ */
+export interface RoleConfig {
+	/** Fixed failover chain for this role; skips classification. */
+	targets?: RouteTarget[];
+	/** Thinking override for this role (wins over tier thinking, loses to target.thinking). */
+	thinking?: ThinkingLevel;
+	/** Raise the classified tier to at least this. */
+	tierFloor?: ComplexityTier;
+	/** Lower the classified tier to at most this. */
+	tierCap?: ComplexityTier;
+}
+
 export interface ProfileConfig {
 	description?: string;
 	/** Fallback tier when the classifier is below confidence threshold. Default "standard". */
 	defaultTier?: ComplexityTier;
 	tiers: Partial<Record<ComplexityTier, TierConfig>>;
+	/** Role-scoped routing. "default" entries clamp the main-session classification. */
+	roles?: Record<string, RoleConfig>;
 	budgets?: Record<string, BudgetLimit>;
 	rules?: PolicyRuleConfig[];
 }
@@ -293,25 +330,6 @@ export interface ComplexityResult {
 // Routing pipeline
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface RoutingContext {
-	/** Prompt after shortcut stripping. */
-	prompt: string;
-	estimatedTokens: number;
-	hasImages: boolean;
-	/** Consecutive turns on the same task (for sticky escalation). 0 = fresh. */
-	conversationDepth: number;
-	/** Tier of the previous decision in this session, if any. */
-	priorTier?: ComplexityTier;
-	/** Candidates for the active profile+tier, pre-enriched by the adapter. */
-	candidates: CandidateInfo[];
-	/** Local time basis for rule conditions and budget windows. */
-	now: Date;
-	/** provider → quota snapshot (may be absent per provider). */
-	quota: Record<string, QuotaSnapshot>;
-	/** "provider/model" → rolling avg latency ms. */
-	latency: Record<string, number>;
-}
-
 export interface RoutingHints {
 	shortcut?: ShortcutToken;
 	profileOverride?: string;
@@ -326,14 +344,28 @@ export interface RoutingHints {
 export interface RoutingDecision {
 	/** Profile actually used (after @profile override / path activation). */
 	profile: string;
+	/** Role within the profile ("default" when the virtual model carried none). */
+	role: string;
 	tier: ComplexityTier;
 	confidence: number;
 	/** First of orderedCandidates. */
 	target: RouteTarget;
 	/** Full failover order after partitioning. */
 	orderedCandidates: RouteTarget[];
-	/** Effective thinking for the selected target: target override, else tier config. */
+	/** Effective thinking for the selected target: target override, else chainThinking. */
 	thinking?: ThinkingLevel;
+	/**
+	 * True when the role declared its own target chain: classification is
+	 * bypassed and orderedCandidates stays in declared config order. Stamped
+	 * by the pipeline — the single source for this rule (shortcut tier pins
+	 * already escaped the fixed chain upstream, so consumers never re-derive it).
+	 */
+	fixedChain?: boolean;
+	/**
+	 * Chain-level thinking fallback for every target in orderedCandidates:
+	 * role override, else tier config. Per-target `thinking` still wins.
+	 */
+	chainThinking?: ThinkingLevel;
 	reasoning: string[];
 	estimatedTokens: number;
 	/** Remaining USD on the selected target's provider, when a limit applies. */
@@ -366,7 +398,9 @@ export interface FailoverHooks {
 	onFailover?: (from: RouteTarget, to: RouteTarget, error: unknown) => void;
 	/** Report a failing target so the caller can cool it down. */
 	onTargetFailed?: (target: RouteTarget, error: unknown) => void;
-	/** Report the target that ultimately produced substantive output. */
+	/** Report the target once substantive output escapes; failover is no longer safe. */
+	onTargetOutput?: (target: RouteTarget) => void;
+	/** Report a target only after its stream ends cleanly following substantive output. */
 	onTargetSettled?: (target: RouteTarget) => void;
 }
 

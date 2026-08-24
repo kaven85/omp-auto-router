@@ -1,6 +1,6 @@
-# 01 — 验证 Pi Mode A 公开流委托
+# 01 — 验证 Pi 公开流委托
 
-**What to build:** 建立一个最小但完整的 Pi Mode A tracer bullet：用户选择一个虚拟 auto-router profile 后，请求通过 Pi 的公开扩展、模型注册表和 Provider interface 委托给真实 target。该验证必须证明后续共享 Router Runtime 不需要访问 Pi 私有实现。
+**What to build:** 建立一个最小但完整的 Pi 流委托 tracer bullet：用户选择一个虚拟 auto-router profile 后，请求通过 Pi 的公开扩展、模型注册表和 Provider interface 委托给真实 target。该验证必须证明后续共享 Router Runtime 不需要访问 Pi 私有实现。
 
 **Blocked by:** None — can start immediately
 
@@ -18,4 +18,4 @@
 - [x] 实现和验证过程不修改、patch、monkey-patch、vendor、复制或覆盖 Pi/OMP 源码及安装目录。
 - [x] 可选能力通过 capability probe 检测；缺失时产生明确诊断而不是基于版本号猜测。
 - [x] 自动化契约测试覆盖文本、工具调用、认证、usage、error、abort，以及 capability present/absent 两种宿主。
-- [x] 若公开 interface 无法满足 Mode A，ticket 输出明确的阻断结论，不以私有接口或宿主源码修改绕过。
+- [x] 若公开 interface 无法满足流委托，ticket 输出明确的阻断结论，不以私有接口或宿主源码修改绕过。

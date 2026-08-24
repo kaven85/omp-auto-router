@@ -9,6 +9,7 @@
 ## 能力一览
 
 - **Profile 体系**：多个命名 profile（如 `premium`/`economy`/`offline`），毫秒级切换
+- **角色路由（profile >> role）**：profile 内按 omp 角色（default/task/smol/…）细分——固定 targets 链（跳过分类，零开销）或 `tierFloor`/`tierCap` 软钳制（保留界内自适应）；钉层永远可逃逸
 - **复杂度分级**：每次请求自动分类 `trivial / simple / standard / complex`，层级联动模型 + thinking 强度
 - **显式钉层**：`@reasoning` / `@swe` / `@long` / `@vision` / `@fast` / `@profile:<name>`（token 自动剥离，模型看不到）
 - **同请求 failover**：首选目标失败（可重试错误、未产出实质内容）自动换下一候选；thinking-only 部分不阻断切换
@@ -121,7 +122,7 @@ modelRoles:
 
 ```text
 [ ] /auto-router doctor
-    → H1 registerProvider/stream ✅、H2 ctx.models 有数量、无 config errors
+    → H1 registerProvider/stream ✅、H2 ctx.models 有数量、无 config errors、modelRoles 检查无 ❌
 [ ] 发一条消息
     → tail ~/.omp/agent/auto-router/auto-router.events.jsonl 出现 decision + settled 两行
 [ ] /auto-router explain
@@ -145,6 +146,7 @@ modelRoles:
 | doctor 显示 config errors | auto-router.yml 校验失败（如 targets 为空） | 按报错 dotted path 修正；错误层会回退到内置默认 |
 | 决策全是预算阻断/换链 | budget 超限或 UVI critical | `/auto-router budget show`、`/auto-router uvi show`；`clear` 后重试 |
 | 子代理没走路由 | `modelRoles.task` 未配置 | 加 `task: auto-router/<profile>`；确认子代理模型变更（会话文件 `model_change` 条目） |
+| doctor 报 `❌ modelRoles` | modelRoles 指向不存在的 profile 或未注册的虚拟模型（多为拼写） | 按 doctor 行列出的可用 profile 修正 `config.yml`；`⚠️ role not declared` 表示该 role 未在 profile 中声明、会按 default 链路由 |
 | `/auto-router reload` 后配置没变 | 改的是项目层但 cwd 不对 | 确认 `<cwd>/.omp/auto-router.yml` 存在且 cwd 匹配 |
 | Pi:profile 可用但所有候选都因未认证被跳过 | target provider 在 Pi 认证存储中没有凭据 | 对该 provider 执行 `/login`(或其认证流程)后重试 |
 | Pi:`/model` 里存在的 target 从不被路由到 | scoped models(`enabledModels`/`--models`)未包含它 | scope 内同时允许虚拟 `auto-router/*` profile 与真实 targets |
@@ -173,6 +175,14 @@ modelRoles:
 | 项目 | `<repo>/.omp/auto-router.yml` | `<repo>/.pi/auto-router.yml`（仅项目受信任时加载） | 该项目内覆盖（同名 profile 整体替换） |
 
 快速上手：复制仓库根 `auto-router.example.yml` 到你的用户层路径，把 `targets` 换成你模型选择器里真实存在的模型。
+
+> **双宿主同步（维护约定）**：omp 与 Pi 同时使用时，两份用户层配置极易漂移。本机已将二者硬链接为同一 inode，改任意一份即同时生效：
+>
+> ```bash
+> ln -f ~/.omp/agent/auto-router.yml "${PI_CODING_AGENT_DIR:-~/.pi/agent}/auto-router.yml"
+> ```
+>
+> 注意：**原子保存（写临时文件再 rename）的编辑器会断开硬链接**——VS Code、部分 JetBrains IDE 默认如此。若改完后另一宿主行为未变，用 `ls -li` 检查两个路径的 inode 是否一致，不一致则重跑上面的 `ln` 命令。新增/迁移机器时也需要重跑一次。
 
 ### 完整示例
 
@@ -234,8 +244,20 @@ activate:                           # 按 cwd 前缀自动激活
 | `description` | string | 否 | 展示用 |
 | `defaultTier` | `trivial/simple/standard/complex` | 否 | 分类器置信度 < 0.45 时兜底；缺省 `standard` |
 | `tiers` | mapping | ✅ | key 限这四级，可只定义子集（阶梯回退：先向上再向下） |
+| `roles` | mapping | 否 | 角色路由：key 为角色名（小写字母/数字/中划线）→ role 配置，见下表 |
 | `budgets` | mapping | 否 | key 为 provider 名 → budget limit |
 | `rules` | array | 否 | 策略规则数组 |
+
+#### role
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `targets` | array | 固定链时必填 | 非空 target 数组；该角色走固定 failover 链，跳过分类。**与 `tierFloor`/`tierCap` 互斥** |
+| `tierFloor` | 复杂度四级 | 否 | 分类结果层级下限（不足则抬升） |
+| `tierCap` | 复杂度四级 | 否 | 分类结果层级上限（超出则压回）；`tierFloor` 不得高于 `tierCap` |
+| `thinking` | `off/minimal/low/medium/high/xhigh/max` | 否 | 覆盖该角色的 thinking 强度（优先级：target > role > tier） |
+
+钉层（`@fast`/`@swe`/`@reasoning`）不受固定链与钳制约束，永远逃逸到分类后的层级。
 
 #### tier
 
@@ -316,7 +338,7 @@ activate:                           # 按 cwd 前缀自动激活
 
 ## Pi 支持与能力降级
 
-Pi 上同一套路由核心与命令集经 Pi 适配器（`src/pi-adapter`）运行，仅通过 Pi 的**公开** ModelRegistry/Provider 接口委托真实 provider（Mode A）。需要注意的行为差异：
+Pi 上同一套路由核心与命令集经 Pi 适配器（`src/pi-adapter`）运行，仅通过 Pi 的**公开** ModelRegistry/Provider 接口委托真实 provider。需要注意的行为差异：
 
 - **Profile 模型**：每个 profile 在模型选择器中显示为 `auto-router/<profile>`；`/auto-router use <profile>` 经模型注册表切换。命令名与参数语法和 omp 共用；宿主能力差异见下表。
 - **配置位置**：用户层 `<agentDir>/auto-router.yml`（agentDir = `$PI_CODING_AGENT_DIR`，否则 `~/.pi/agent`）；项目层 `<repo>/.pi/auto-router.yml` **仅在项目受信任时读取**——不受信任的项目会被忽略，`/auto-router doctor` 会明说。
@@ -332,8 +354,8 @@ Pi 上同一套路由核心与命令集经 Pi 适配器（`src/pi-adapter`）运
 
 | 命令 | Pi 行为 | 与 omp 的差异 |
 |---|---|---|
-| `status` | 在 profile 和最近决策后显示 `mode: A (stream delegation)`。 | omp 显示自身 Adapter 的模式/状态。 |
-| `doctor` | 报告所需的公开 Mode A 接口、项目可信状态，并把 UVI 标为**可选且不可用**。 | omp 报告 H1–H7 宿主探测矩阵，并可暴露 quota 能力。 |
+| `status` | 显示当前 profile 和最近一次决策。 | omp 显示自身 Adapter 的状态。 |
+| `doctor` | 报告所需的公开委托接口、项目可信状态，并把 UVI 标为**可选且不可用**。 | omp 报告 H1–H7 宿主探测矩阵，并可暴露 quota 能力。 |
 | `uvi show\|enable\|disable\|refresh` | 任意 action 都返回明确的不可用提示；不会切换状态、伪造或刷新 quota。 | 仅 omp 暴露 usage-report quota 时可用。 |
 | `usage [page]` | 显示 settled 本地调用、本地预算和已认证 provider 余额；没有 UVI/quota window。 | 可包含宿主 usage-report 的 quota window。 |
 | `use <profile>` | 经 Pi 公开模型注册表解析已注册的 `auto-router/<profile>`。使用 scoped models 时，虚拟 profile 与真实 targets 都必须在 scope 内。 | omp 经其模型 facade / model-role 配置解析。 |
@@ -363,14 +385,50 @@ modelRoles:
 
 选中后**无需手动干预**：每次请求自动分级选模型。可随时 `/auto-router use <profile|alias>` 切换（毫秒级，会话级持久化）。
 
+### 角色路由（profile >> role）
+
+上面的 `task: auto-router/economy` 是**整 profile 切换**——粒度到 profile 为止。若只想在同一个 profile 内按角色细分模型（典型场景：`company` / `personal` 两个 profile 各自管理一套 provider 集合，角色决定用其中哪个模型），在 profile 里声明 `roles`，然后把 omp 角色指向 `auto-router/<profile>/<role>`：
+
+```yaml
+# auto-router.yml
+profiles:
+  company:
+    defaultTier: standard
+    tiers: { … }                    # default 角色：复杂度分类，照旧
+    roles:
+      task:                          # 固定链：跳过分类，零开销
+        targets: [{ provider: deepseek, model: deepseek-v4-flash, billing: per-token }]
+      smol: { tierCap: simple }      # 软钳制：照常分类，但层级封顶 simple
+      slow: { tierFloor: complex }   # 软钳制：层级保底 complex
+```
+
+```yaml
+# ~/.omp/agent/config.yml
+modelRoles:
+  default: auto-router/company        # 裸 id ≡ company/default
+  task:    auto-router/company/task
+  smol:    auto-router/company/smol
+  slow:    auto-router/company/slow
+```
+
+规则：
+
+- **固定链**（`targets`）：该角色所有请求直接走这条 failover 链，不做复杂度分类、不做 LLM 仲裁；`thinking` 可覆盖。
+- **软钳制**（`tierFloor` / `tierCap`）：照常分类，结果钳到界内（分类器、粘性升级、测试失败升级照常参与）。
+- **钉层逃逸**：`@fast` / `@swe` / `@reasoning` 永远优先——即使在固定链角色上，钉层也会跳出该链进入分类后的层级链。
+- 未声明的角色 → 按 `default` 处理；`roles.default` 可给主会话加钳制（如 `tierFloor: simple` 防止主会话落到 trivial）。
+- LLM 仲裁只发生在 `default` 角色上——task/smol 等角色省掉这次额外调用。
+- 角色名限小写字母/数字/中划线（会拼进虚拟模型 id）；omp 侧角色全集见 omp 文档（default/smol/slow/vision/plan/designer/commit/tiny/task/advisor），声明 omp 不认识的角色名无害但不会被用到。
+- `/model` 里每个声明的角色显示为 `Auto Router: <profile> (<role>)`；状态栏/explain/事件日志均带 role。
+
 ## 复杂度分级与快捷键
 
 | 层 | 典型信号 | 联动 |
 |---|---|---|
-| `trivial` | 短问答、无代码 | thinking low |
+| `trivial` | 短问答（按提示词判定，与上下文长度无关）、无代码 | thinking low |
 | `simple` | 单文件改动、解释、grep 类 | thinking low |
-| `standard` | 代码块、多文件路径、diff、实现类措辞 | thinking medium |
-| `complex` | 重构/迁移/架构关键词、长上下文、同任务多轮 | thinking high |
+| `standard` | 代码块、多文件路径、diff、实现类措辞、长/超长上下文 | thinking medium |
+| `complex` | 重构/迁移/架构关键词、同任务多轮 | thinking high |
 
 > **拆分分析**：提示词按阶段连词（`并/然后/接着/随后/再`、`and/then`）和句末标点拆成阶段序列，**首阶段定层**——后续阶段轮到各自请求时再分类、层级随阶段流转。"帮我设计并实现一个登录功能" 首阶段是设计 → complex（实现那轮再落 standard，即 complex→standard）；"实现支付逻辑，然后设计对账方案" 首阶段是实现 → standard（设计那轮升 complex，即 standard→complex）；"按设计方案实现支付逻辑" 单阶段内含实现措辞（方案是既有产物）→ standard。硬性范围词（`重构/迁移/架构/跨文件`、`refactor/migrate/rewrite`）只在首阶段内计数。
 >
@@ -395,7 +453,9 @@ modelRoles:
 
 #### → `complex`（权重 5，唯一定层到 complex 的信号）
 
-命中**任一多步词**即 push complex；或 `@reasoning` 钉层；或上下文 ≥ 100k tokens（epic）。
+命中**任一多步词**即 push complex；或 `@reasoning` 钉层。
+
+> 上下文 ≥ 100k tokens（epic）不再直接定层 complex：上下文长度决定的是模型**窗口**（能力），不是推理档位。epic 上下文自动派生 `minContextWindow` 需求（等同 `@long` 的 `max(100k, 估算)`），并把分级封顶到 standard；短 general 问答（提示词 < 200 tokens）则完全抑制上下文尺寸信号——"你是谁"在 150k 上下文的会话里照常落 trivial，窗口放不下时由能力升级兜底（见下）。
 
 **多步词 —— 子串匹配（含中文）**
 ```
@@ -439,7 +499,7 @@ roadmap blueprint strategy decompose modularize modularise restructure
   develop develops developing
   ```
 - code / analysis 意图（含 `实现`、`analyze`、`分析` 等意图词）但无结构信号
-- 上下文 32k–100k tokens（long）
+- 上下文 32k–100k tokens（long）；≥ 100k tokens（epic）也封顶至此
 - 钉层：`@swe`
 
 #### → `simple`
@@ -451,19 +511,13 @@ roadmap blueprint strategy decompose modularize modularise restructure
 
 #### → `trivial`
 
-- 短 general 问答（估算 < 200 tokens、无代码/repair/图片信号）
+- 短 general 问答（**提示词**估算 < 200 tokens、无代码/repair/图片信号）——上下文尺寸信号被抑制，窗口适配交给 `minContextWindow` 能力约束
 - 上下文 < 4k tokens（short）
 - 钉层无专属 token（`@fast` 落 simple，已是最低档之一）
 
-#### 意图词表（辅助 standard/trivial 判定）
-
-| intent | 英文 | 中文 |
-|---|---|---|
-| code | code coding function bug debug compile exception typescript javascript python regex sql api endpoint unit test implement refactor runtime error | 代码 报错 函数 调试 编译 实现 修复 |
-| creative | poem poetry story blog essay lyrics song novel fiction joke | 写诗 诗歌 诗 故事 小说 博客 散文 文案 歌词 |
-| analysis | analyze analyse analysis summarize summary compare comparison contrast review evaluate assessment explain pros and cons | 分析 总结 对比 比较 评审 评估 解释 |
-
 > 词表来源：`src/core/complexity-classifier.ts`（多步/repair）、`src/core/intent-classifier.ts`（意图）、`src/core/context-analyzer.ts`（上下文分档）、`src/core/shortcut-parser.ts`（钉层 token）。词表可调，改动不影响路由逻辑。
+
+> **上下文窗口兜底**：epic 上下文（估算 ≥ 100k tokens）自动给本次请求加 `minContextWindow ≥ 估算` 需求，与 `@long` 一致。若当前分级层的候选模型窗口都装不下，路由向**最近的更高层**升级（与 reasoning 保障同一套机制），而不是直接跳到 complex——例如 trivial 层模型窗口 60k、上下文 150k 时，升级到窗口够用的 standard 层。
 
 ## 命令
 
@@ -474,7 +528,7 @@ roadmap blueprint strategy decompose modularize modularise restructure
 | `/auto-router use <profile\|alias>` | 切换 profile（持久化，resume/branch 保留） | `/auto-router use economy` |
 | `/auto-router list` / `show <profile>` | 当前 profile 的 tier 链 / 某 profile 详情 | `/auto-router show premium` |
 | `/auto-router explain` | 上次决策的完整推理链（含宿主可提供的 quota 数据） | `/auto-router explain` |
-| `/auto-router doctor` | 宿主能力诊断 + 配置错误（omp：H1–H7；Pi：Mode A/信任/UVI） | `/auto-router doctor` |
+| `/auto-router doctor` | 宿主能力诊断 + 配置错误（omp：H1–H7；Pi：委托接口/信任/UVI） | `/auto-router doctor` |
 | `/auto-router reload` | 重读 auto-router.yml | `/auto-router reload` |
 | `/auto-router budget show\|set <p> <usd> [monthly]\|clear <p>` | 预算管理（80% 警告 / 100% 阻断） | `/auto-router budget set google 20 monthly` |
 | `/auto-router uvi show\|enable\|disable\|refresh` | usage-report 配额配速；Pi 对任意 action 都显式提示不可用 | `/auto-router uvi show` |

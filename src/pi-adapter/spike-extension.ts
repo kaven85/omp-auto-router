@@ -1,5 +1,5 @@
 /**
- * Manual Pi compatibility probe for Mode A delegation.
+ * Manual Pi compatibility probe for stream delegation.
  *
  * Run with `pi -e ./src/pi-adapter/spike-extension.ts`, select
  * `auto-router-spike/probe`, then send a prompt. The probe delegates to the

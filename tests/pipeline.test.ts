@@ -133,7 +133,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "@reasoning prove there are infinitely many primes",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
 				now: NOW,
@@ -170,7 +169,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "@reasoning prove there are infinitely many primes",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(config)),
 				quota: {},
 				now: NOW,
@@ -184,12 +182,12 @@ describe("pipeline", () => {
 	test("classifierOverrides from deps steer the resolved tier", () => {
 		const candidates = targetCandidates(allTargets(CONFIG));
 		const baseline = route(
-			{ rawPrompt: "帮我造个轮子", hasImages: false, conversationDepth: 0, candidates, quota: {}, now: NOW },
+			{ rawPrompt: "帮我造个轮子", hasImages: false, candidates, quota: {}, now: NOW },
 			makeDeps(),
 		);
 		expect(baseline.decision.tier).not.toBe("complex");
 		const overridden = route(
-			{ rawPrompt: "帮我造个轮子", hasImages: false, conversationDepth: 0, candidates, quota: {}, now: NOW },
+			{ rawPrompt: "帮我造个轮子", hasImages: false, candidates, quota: {}, now: NOW },
 			makeDeps({ classifierOverrides: { add: { multiStep: ["造个轮子"] } } }),
 		);
 		expect(overridden.decision.tier).toBe("complex");
@@ -202,7 +200,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "@profile:eco fix this typo",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
 				now: NOW,
@@ -221,7 +218,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "hello there",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
 				now: NOW,
@@ -238,7 +234,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "short",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
 				estimatedTokens: 150_000, // force epic context despite short prompt
@@ -255,7 +250,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "short",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
 				now: NOW,
@@ -278,7 +272,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "@swe migrate this service",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates,
 				quota: {},
 				now: NOW,
@@ -304,7 +297,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "把标题改成红色", // short general prompt → classifier says trivial
 				hasImages: false,
-				conversationDepth: 0,
 				candidates,
 				quota: {},
 				now: NOW,
@@ -319,6 +311,36 @@ describe("pipeline", () => {
 		expect(result.decision.reasoning.join("\n")).toContain("escalated to standard");
 	});
 
+	test("epic context auto-requires a window and escalates when the tier's models are too small", () => {
+		// A short general prompt at 150k context classifies trivial, but the
+		// pipeline derives minContextWindow=150k from the epic context. The
+		// trivial tier's only model (deepseek/flash, 60k window) is excluded,
+		// so routing escalates to standard (anthropic/sonnet, 200k window).
+		const deps = makeDeps();
+		const candidates = targetCandidates(allTargets(CONFIG)).map((c) =>
+			c.key === "deepseek/flash"
+				? { ...c, capabilities: { ...CAPS, contextWindow: 60_000 } }
+				: c,
+		);
+		const result = route(
+			{
+				rawPrompt: "hi",
+				hasImages: false,
+				candidates,
+				quota: {},
+				estimatedTokens: 150_000,
+				now: NOW,
+			},
+			deps,
+		);
+		expect(result.decision.tier).toBe("standard");
+		expect(result.decision.target).toEqual({ provider: "anthropic", model: "sonnet" });
+		expect(result.decision.orderedCandidates).toEqual([{ provider: "anthropic", model: "sonnet" }]);
+		expect(result.decision.reasoning.join("\n")).toContain("excluded deepseek/flash");
+		expect(result.decision.reasoning.join("\n")).toContain("context window required");
+		expect(result.decision.reasoning.join("\n")).toContain("escalated to standard");
+	});
+
 	test("hasImages requires vision-capable candidates", () => {
 		const deps = makeDeps();
 		const candidates = targetCandidates(allTargets(CONFIG)).map((c) =>
@@ -330,7 +352,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "@reasoning what's in this screenshot?",
 				hasImages: true,
-				conversationDepth: 0,
 				candidates,
 				quota: {},
 				now: NOW,
@@ -349,7 +370,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "@swe implement a function",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
 				now: NOW,
@@ -370,7 +390,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "implement a function",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
 				now: NOW,
@@ -390,7 +409,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "@reasoning design a distributed system",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota,
 				now: NOW,
@@ -409,7 +427,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "@reasoning hard problem",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
 				now: NOW,
@@ -428,7 +445,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "implement a function",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
 				now: NOW,
@@ -445,7 +461,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "fix the typo",
 				hasImages: false,
-				conversationDepth: 3,
 				priorTier: "complex",
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
@@ -465,7 +480,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "refactor this entire codebase across ten modules",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
 				now: NOW,
@@ -482,7 +496,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "hello",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: [], // adapter failed to enrich any target
 				quota: {},
 				now: NOW,
@@ -501,7 +514,6 @@ describe("pipeline", () => {
 				rawPrompt: "@swe implement a function",
 				profile: "economy",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
 				now: NOW,
@@ -521,7 +533,6 @@ describe("pipeline", () => {
 				rawPrompt: "@profile:eco hello",
 				profile: "premium",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
 				now: NOW,
@@ -541,7 +552,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "@swe implement a function",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
 				now: lateMonth,
@@ -560,7 +570,6 @@ describe("pipeline", () => {
 				// adjudication says complex → complex target wins.
 				rawPrompt: "帮我设计并实现一个登录功能",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
 				adjudicatedTier: "complex",
@@ -578,7 +587,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "@fast 帮我设计并实现一个登录功能",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
 				adjudicatedTier: "complex",
@@ -597,7 +605,6 @@ describe("pipeline", () => {
 			{
 				rawPrompt: "帮我设计并实现一个登录功能",
 				hasImages: false,
-				conversationDepth: 0,
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
 				adjudicatedTier: "complex",
@@ -606,5 +613,259 @@ describe("pipeline", () => {
 			deps,
 		);
 		expect(result.decision.tier).toBe("simple");
+	});
+});
+
+const ROLE_CONFIG: RouterConfig = {
+	active: "company",
+	profiles: {
+		company: {
+			defaultTier: "standard",
+			tiers: {
+				trivial: { targets: [{ provider: "deepseek", model: "flash", billing: "per-token" }] },
+				simple: { targets: [{ provider: "deepseek", model: "flash", billing: "per-token" }] },
+				standard: { targets: [{ provider: "anthropic", model: "sonnet" }] },
+				complex: { targets: [{ provider: "anthropic", model: "opus" }] },
+			},
+			roles: {
+				task: {
+					targets: [{ provider: "ollama", model: "qwen3" }],
+					thinking: "low",
+				},
+				smol: { tierCap: "simple" },
+				slow: { tierFloor: "complex" },
+			},
+		},
+	},
+};
+
+const ROLE_CANDIDATES: RouteTarget[] = [
+	{ provider: "deepseek", model: "flash", billing: "per-token" },
+	{ provider: "anthropic", model: "sonnet" },
+	{ provider: "anthropic", model: "opus" },
+	{ provider: "ollama", model: "qwen3" },
+];
+
+function routeWithRole(rawPrompt: string, role?: string) {
+	const config = structuredClone(ROLE_CONFIG);
+	const deps = makeDeps({ registry: new ProfileRegistry(config, { cwd: "/tmp/work" }) });
+	return route(
+		{
+			rawPrompt,
+			...(role !== undefined ? { role } : {}),
+			hasImages: false,
+			candidates: targetCandidates(ROLE_CANDIDATES),
+			quota: {},
+			now: NOW,
+		},
+		deps,
+	);
+}
+
+describe("pipeline role routing", () => {
+	test("fixed-chain role bypasses classification even for complex-sounding prompts", () => {
+		const result = routeWithRole("重构整个模块，重写架构并迁移所有调用方", "task");
+		expect(result.decision.role).toBe("task");
+		expect(result.decision.target).toEqual({ provider: "ollama", model: "qwen3" });
+		expect(result.decision.orderedCandidates).toEqual([{ provider: "ollama", model: "qwen3" }]);
+		expect(result.decision.thinking).toBe("low");
+		expect(result.decision.reasoning.some((r) => r.includes("fixed chain"))).toBe(true);
+	});
+
+	test("shortcut pin escapes a fixed-chain role into the classified tier", () => {
+		const result = routeWithRole("@reasoning prove the halting problem is undecidable", "task");
+		expect(result.decision.tier).toBe("complex");
+		expect(result.decision.target).toEqual({ provider: "anthropic", model: "opus" });
+	});
+
+	test("tierCap clamps a complex classification down", () => {
+		const result = routeWithRole("重构整个模块，重写架构并迁移所有调用方", "smol");
+		expect(result.decision.tier).toBe("simple");
+		expect(result.decision.target).toEqual({ provider: "deepseek", model: "flash", billing: "per-token" });
+		expect(result.decision.reasoning.some((r) => r.includes("tierCap"))).toBe(true);
+	});
+
+	test("tierFloor raises a trivial classification up", () => {
+		const result = routeWithRole("改个 typo", "slow");
+		expect(result.decision.tier).toBe("complex");
+		expect(result.decision.target).toEqual({ provider: "anthropic", model: "opus" });
+		expect(result.decision.reasoning.some((r) => r.includes("tierFloor"))).toBe(true);
+	});
+
+	test("shortcut pin bypasses role clamps", () => {
+		const result = routeWithRole("@reasoning prove the halting problem is undecidable", "smol");
+		expect(result.decision.tier).toBe("complex");
+		expect(result.decision.target).toEqual({ provider: "anthropic", model: "opus" });
+	});
+
+	test("undeclared role falls back to default classification", () => {
+		const result = routeWithRole("重构整个模块，重写架构并迁移所有调用方", "vision");
+		expect(result.decision.role).toBe("vision");
+		expect(result.decision.tier).toBe("complex");
+		expect(result.decision.reasoning.some((r) => r.includes("undeclared"))).toBe(true);
+	});
+
+	test("absent role routes as default and tags the decision", () => {
+		const result = routeWithRole("改个 typo");
+		expect(result.decision.role).toBe("default");
+		expect(result.decision.tier).toBe("trivial");
+	});
+
+	test("fixed-chain role keeps the declared target order", () => {
+		const config = structuredClone(ROLE_CONFIG);
+		config.profiles.company!.roles = {
+			task: {
+				targets: [
+					{ provider: "deepseek", model: "flash", billing: "per-token" },
+					{ provider: "anthropic", model: "sonnet" },
+				],
+			},
+		};
+		const result = route(
+			{
+				rawPrompt: "重构整个模块，重写架构并迁移所有调用方",
+				role: "task",
+				hasImages: false,
+				candidates: targetCandidates(ROLE_CANDIDATES),
+				quota: {},
+				now: NOW,
+			},
+			makeDeps({ registry: new ProfileRegistry(config, { cwd: "/tmp/work" }) }),
+		);
+		// The partitioner ranks subscription anthropic/sonnet ahead of
+		// per-token deepseek/flash; a fixed chain must keep the declared order.
+		expect(result.decision.orderedCandidates).toEqual([
+			{ provider: "deepseek", model: "flash", billing: "per-token" },
+			{ provider: "anthropic", model: "sonnet" },
+		]);
+		expect(result.decision.target).toEqual({ provider: "deepseek", model: "flash", billing: "per-token" });
+	});
+
+	test("fixed-chain role keeps its own target metadata when a tier lists the same model", () => {
+		const config = structuredClone(ROLE_CONFIG);
+		// The standard tier lists anthropic/sonnet as a subscription target;
+		// the role chain declares the same model per-token. The role's own
+		// metadata must survive candidate enrichment.
+		config.profiles.company!.roles = {
+			task: { targets: [{ provider: "anthropic", model: "sonnet", billing: "per-token" }] },
+		};
+		const result = route(
+			{
+				rawPrompt: "重构整个模块，重写架构并迁移所有调用方",
+				role: "task",
+				hasImages: false,
+				candidates: targetCandidates(ROLE_CANDIDATES),
+				quota: {},
+				now: NOW,
+			},
+			makeDeps({ registry: new ProfileRegistry(config, { cwd: "/tmp/work" }) }),
+		);
+		expect(result.decision.target).toEqual({ provider: "anthropic", model: "sonnet", billing: "per-token" });
+	});
+
+	test("capability escalation re-applies exclude-provider policy to the escalated pool", () => {
+		const config: RouterConfig = {
+			active: "p",
+			profiles: {
+				p: {
+					defaultTier: "standard",
+					tiers: {
+						trivial: { targets: [{ provider: "a", model: "small" }] },
+						standard: { targets: [{ provider: "b", model: "big" }] },
+						complex: { targets: [{ provider: "c", model: "big" }] },
+					},
+					rules: [{ type: "exclude-provider", providers: ["b"] }],
+				},
+			},
+		};
+		const candidates = targetCandidates([
+			{ provider: "a", model: "small" },
+			{ provider: "b", model: "big" },
+			{ provider: "c", model: "big" },
+		]).map(c => (c.key === "a/small" ? { ...c, capabilities: { ...CAPS, contextWindow: 60_000 } } : c));
+		const result = route(
+			{
+				rawPrompt: "hi",
+				hasImages: false,
+				candidates,
+				quota: {},
+				estimatedTokens: 150_000,
+				now: NOW,
+			},
+			makeDeps({ registry: new ProfileRegistry(config, { cwd: "/tmp/work" }) }),
+		);
+		// standard's only big-window model is policy-excluded: escalation must
+		// skip it and land on complex, never on the excluded provider.
+		expect(result.decision.tier).toBe("complex");
+		expect(result.decision.target).toEqual({ provider: "c", model: "big" });
+		expect(result.decision.orderedCandidates).toEqual([{ provider: "c", model: "big" }]);
+	});
+
+	test("capability escalation is bounded by the role tierCap", () => {
+		const config = structuredClone(ROLE_CONFIG);
+		// smol caps at simple; only standard+ tiers have a big enough window
+		// for a 150k context (deepseek/flash shrunk to 60k).
+		const candidates = targetCandidates(ROLE_CANDIDATES).map(c =>
+			c.key === "deepseek/flash" ? { ...c, capabilities: { ...CAPS, contextWindow: 60_000 } } : c,
+		);
+		const result = route(
+			{
+				rawPrompt: "hi",
+				role: "smol",
+				hasImages: false,
+				candidates,
+				quota: {},
+				estimatedTokens: 150_000,
+				now: NOW,
+			},
+			makeDeps({ registry: new ProfileRegistry(config, { cwd: "/tmp/work" }) }),
+		);
+		// No permitted tier can serve the window: stay within the cap with an
+		// empty chain rather than escalating to standard/complex.
+		expect(result.decision.tier).not.toBe("standard");
+		expect(result.decision.tier).not.toBe("complex");
+		expect(result.decision.orderedCandidates).toEqual([]);
+		expect(result.decision.reasoning.join("\n")).not.toContain("escalated to standard");
+	});
+
+	test("role thinking overrides tier thinking but loses to target thinking", () => {
+		const config = structuredClone(ROLE_CONFIG);
+		config.profiles.company!.roles = { plan: { tierFloor: "standard", thinking: "low" } };
+		config.profiles.company!.tiers.standard = {
+			thinking: "high",
+			targets: [{ provider: "anthropic", model: "sonnet" }],
+		};
+		const deps = makeDeps({ registry: new ProfileRegistry(config, { cwd: "/tmp/work" }) });
+		const result = route(
+			{
+				rawPrompt: "改个 typo",
+				role: "plan",
+				hasImages: false,
+				candidates: targetCandidates(ROLE_CANDIDATES),
+				quota: {},
+				now: NOW,
+			},
+			deps,
+		);
+		expect(result.decision.tier).toBe("standard");
+		expect(result.decision.thinking).toBe("low");
+
+		// target.thinking still wins over the role override
+		config.profiles.company!.tiers.standard = {
+			thinking: "high",
+			targets: [{ provider: "anthropic", model: "sonnet", thinking: "medium" }],
+		};
+		const withTargetThinking = route(
+			{
+				rawPrompt: "改个 typo",
+				role: "plan",
+				hasImages: false,
+				candidates: targetCandidates([{ provider: "anthropic", model: "sonnet", thinking: "medium" }]),
+				quota: {},
+				now: NOW,
+			},
+			makeDeps({ registry: new ProfileRegistry(config, { cwd: "/tmp/work" }) }),
+		);
+		expect(withTargetThinking.decision.thinking).toBe("medium");
 	});
 });

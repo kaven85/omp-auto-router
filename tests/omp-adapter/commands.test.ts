@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -117,7 +117,7 @@ describe("adapter commands", () => {
 	test("list shows tier chains of active profile", async () => {
 		const { invoke, notifies } = setup();
 		await invoke("list");
-		expect(notifies.join("\n")).toContain("standard (thinking=medium): anthropic/sonnet, deepseek/flash");
+		expect(notifies.join("\n")).toContain("常规开发 (standard) (thinking=medium): anthropic/sonnet, deepseek/flash");
 	});
 
 	test("show renders a profile in detail", async () => {
@@ -137,6 +137,7 @@ describe("adapter commands", () => {
 			cleanPrompt: "hello",
 			decision: {
 				profile: "premium",
+				role: "default",
 				tier: "standard",
 				confidence: 0.9,
 				target: { provider: "anthropic", model: "sonnet" },
@@ -153,7 +154,7 @@ describe("adapter commands", () => {
 		notifies.length = 0;
 		await invoke("explain");
 		const out = notifies.join("\n");
-		expect(out).toContain("profile=premium tier=standard");
+		expect(out).toContain("profile=premium role=default tier=常规开发 (standard)");
 		expect(out).toContain("anthropic/sonnet");
 		expect(out).toContain("shortcut @swe");
 	});
@@ -164,7 +165,6 @@ describe("adapter commands", () => {
 		const out = notifies.join("\n");
 		expect(out).toContain("auto-router doctor");
 		expect(out).toContain("H1 registerProvider/stream");
-		expect(out).toContain("mode: A");
 	});
 
 	test("budget set/show/clear round-trips limits", async () => {
@@ -209,6 +209,7 @@ describe("adapter commands", () => {
 			cleanPrompt: "hello",
 			decision: {
 				profile: "premium",
+				role: "default",
 				tier: "standard",
 				confidence: 0.9,
 				target: { provider: "anthropic", model: "sonnet" },
@@ -392,13 +393,13 @@ describe("adapter commands", () => {
 		for (const list of ["multiStep", "multiStepWord", "repairDebug", "mechanicalOp", "mechanicalOpWord", "implementation", "implementationWord"]) {
 			expect(out).toContain(list);
 		}
-		expect(out).toContain("→ complex");
-		expect(out).toContain("→ standard");
-		expect(out).toContain("→ simple");
+		expect(out).toContain("→ 深度工程 (complex)");
+		expect(out).toContain("→ 常规开发 (standard)");
+		expect(out).toContain("→ 轻任务 (simple)");
 		expect(out).toContain("refactor");
 		expect(out).toContain("提交代码");
 		expect(out).toContain("内置信号（不可编辑）");
-		expect(out).toContain("@fast→simple");
+		expect(out).toContain("@fast→轻任务");
 		// No overrides yet → no overrides summary line.
 		expect(out).not.toContain("overrides: +");
 	});

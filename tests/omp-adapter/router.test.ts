@@ -98,7 +98,7 @@ function contextWithPrompt(prompt: string) {
 	};
 }
 
-describe("adapter router (Mode A)", () => {
+describe("adapter router", () => {
 	test("basic stream: routes, strips shortcut, forwards events", async () => {
 		const { api, state, ctx, dir } = setup();
 		streamBehavior = async function* () {
@@ -142,6 +142,63 @@ describe("adapter router (Mode A)", () => {
 		// complex tier config thinking=high; mock's pre-existing level is "medium".
 		expect(api.thinkingLevels).toEqual(["high", "medium"]);
 	});
+
+	test("thinking level is not mutated when the host cannot report the prior level", async () => {
+		const { api, state } = setup();
+		Object.defineProperty(api, "getThinkingLevel", { value: undefined });
+		streamBehavior = async function* () {
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		state.ctx = api.makeCtx();
+		const handler = createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context: contextWithPrompt("@reasoning prove primes"),
+			options: {},
+		});
+		for await (const _event of handler) { /* drain */ }
+		expect(api.thinkingLevels).toEqual([]);
+	});
+
+	test("concurrent delegated streams serialize host-global thinking overrides", async () => {
+		const { api, state } = setup();
+		state.ctx = api.makeCtx();
+		let enterFirst!: () => void;
+		let releaseFirst!: () => void;
+		const firstEntered = new Promise<void>((resolve) => { enterFirst = resolve; });
+		const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+		let calls = 0;
+		streamBehavior = async function* () {
+			calls += 1;
+			if (calls === 1) {
+				enterFirst();
+				await firstGate;
+			}
+			yield { type: "done", reason: "stop", message: {} };
+		};
+		const drain = async (handler: AsyncIterable<unknown>) => {
+			for await (const _event of handler) { /* drain */ }
+		};
+		const first = drain(createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context: contextWithPrompt("@reasoning first"),
+			options: {},
+		}));
+		await firstEntered;
+		const second = drain(createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "premium" },
+			context: contextWithPrompt("@reasoning second"),
+			options: {},
+		}));
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(streamCalls).toHaveLength(1);
+		releaseFirst();
+		await Promise.all([first, second]);
+		expect(streamCalls).toHaveLength(2);
+		expect(api.thinkingLevels).toEqual(["high", "medium", "high", "medium"]);
+	});
+
+
 
 	test("target thinking overrides tier thinking per failover candidate", async () => {
 		const config: RouterConfig = {
@@ -358,7 +415,7 @@ describe("adapter router (Mode A)", () => {
 	});
 
 	test("uses ctx.getContextUsage() as the authoritative token estimate", async () => {
-		const { api, state, ctx } = setup();
+		const { api, state } = setup();
 		streamBehavior = async function* () {
 			yield { type: "done", reason: "stop", message: {} };
 		};
@@ -424,6 +481,46 @@ describe("adapter router (Mode A)", () => {
 		expect(streamCalls).toEqual([{ provider: "anthropic", model: "opus" }]);
 		rmSync(dir, { recursive: true, force: true });
 	});
+
+	test("readiness from one profile does not suppress discovery for another profile", async () => {
+		const config: RouterConfig = {
+			profiles: {
+				first: { defaultTier: "standard", tiers: { standard: { targets: [{ provider: "anthropic", model: "sonnet" }] } } },
+				second: { defaultTier: "standard", tiers: { standard: { targets: [{ provider: "google", model: "gemini" }] } } },
+			},
+		};
+		const { api, state, dir } = setup(config, [MODELS[0]!]);
+		const ctx = api.makeCtx({
+			setTimeout: (fn) => {
+				api.models = [MODELS[0]!, MODELS[3]!];
+				queueMicrotask(fn);
+				return 0;
+			},
+		});
+		state.ctx = ctx;
+		streamBehavior = async function* () {
+			yield { type: "done", reason: "stop", message: {} };
+		};
+
+		for await (const _event of createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "first" },
+			context: contextWithPrompt("first request"),
+			options: {},
+		})) { /* drain */ }
+		for await (const _event of createStreamHandler(state, api, {
+			model: { provider: "auto-router", id: "second" },
+			context: contextWithPrompt("second request"),
+			options: {},
+		})) { /* drain */ }
+
+		expect(streamCalls).toEqual([
+			{ provider: "anthropic", model: "sonnet" },
+			{ provider: "google", model: "gemini" },
+		]);
+		expect(state.readyModelKeys).toEqual(new Set(["anthropic/sonnet", "google/gemini"]));
+		rmSync(dir, { recursive: true, force: true });
+	});
+
 	test("reload retains session context for subsequent streams", async () => {
 		const configDir = mkdtempSync(join(tmpdir(), "ar-router-reload-"));
 		mkdirSync(join(configDir, "auto-router"), { recursive: true });
@@ -964,10 +1061,15 @@ describe("adapter router (Mode A)", () => {
 		const { api, state, dir } = setup();
 		// Empty host registry → host.isHealthy(t) false for every target.
 		api.models = [];
-		const ctx = api.makeCtx();
+		const ctx = api.makeCtx({
+			// Discovery must retry stale readiness keys; resolve polling immediately.
+			setTimeout: (fn) => {
+				queueMicrotask(fn);
+				return 0;
+			},
+		});
 		state.shadowEnabled = true;
-		// Skip the async discovery grace loop — mock ctx.setTimeout never fires.
-		state.modelsReady = true;
+		state.readyModelKeys.add("anthropic/opus");
 		const context = contextWithPrompt("@swe implement a function");
 		state.ctx = ctx;
 		const handler = createStreamHandler(state, api, {
@@ -1086,11 +1188,11 @@ describe("widget rendering", () => {
 		};
 		// Widget shows only the current provider's balance.
 		expect(buildWidgetLines(state, decisionFor("roll-a"))).toEqual([
-			"main | tier=standard | roll-a/m",
+			"main | tier=常规开发 (standard) | roll-a/m",
 			"uvi: roll-a 100% left",
 		]);
 		expect(buildWidgetLines(state, decisionFor("roll-b"))).toEqual([
-			"main | tier=standard | roll-b/m",
+			"main | tier=常规开发 (standard) | roll-b/m",
 			"uvi: roll-b 20% left",
 		]);
 		rmSync(dir, { recursive: true, force: true });
@@ -1104,7 +1206,7 @@ describe("widget rendering", () => {
 		};
 		expect(buildWidgetLines(state)).toEqual([]);
 		expect(buildWidgetLines(state, decisionFor("solo-p"))).toEqual([
-			"main | tier=standard | solo-p/m",
+			"main | tier=常规开发 (standard) | solo-p/m",
 			"uvi: solo-p 50% left",
 		]);
 		rmSync(dir, { recursive: true, force: true });
@@ -1114,7 +1216,7 @@ describe("widget rendering", () => {
 		// deepseek is balance-capable: no usage windows, but a cached wallet.
 		state.balanceCache = { deepseek: { currency: "USD", total: "12.34" } };
 		expect(buildWidgetLines(state, decisionFor("deepseek"))).toEqual([
-			"main | tier=standard | deepseek/m",
+			"main | tier=常规开发 (standard) | deepseek/m",
 			"balance: deepseek 12.34 USD",
 		]);
 		rmSync(dir, { recursive: true, force: true });
@@ -1128,11 +1230,11 @@ describe("widget rendering", () => {
 		};
 		// per-token is annotated; default subscription is not.
 		expect(buildWidgetLines(state, decisionFor("wt-p", "per-token"))).toEqual([
-			"main | tier=standard | wt-p/m (per-token)",
+			"main | tier=常规开发 (standard) | wt-p/m (per-token)",
 			"uvi: wt-p 70% left",
 		]);
 		expect(buildWidgetLines(state, decisionFor("wt-p", "subscription"))).toEqual([
-			"main | tier=standard | wt-p/m",
+			"main | tier=常规开发 (standard) | wt-p/m",
 			"uvi: wt-p 70% left",
 		]);
 		rmSync(dir, { recursive: true, force: true });
@@ -1142,7 +1244,7 @@ describe("widget rendering", () => {
 		const { state, dir } = setup();
 		state.latency.record("kimi-code/m", 65_653);
 		expect(buildWidgetLines(state, decisionFor("kimi-code"))).toEqual([
-			"main | tier=standard | kimi-code/m | first output=65.7s",
+			"main | tier=常规开发 (standard) | kimi-code/m | first output=65.7s",
 		]);
 		rmSync(dir, { recursive: true, force: true });
 	});
@@ -1202,7 +1304,7 @@ describe("widget rendering", () => {
 		};
 		renderRouterWidget(state, (lines) => host.setWidget(lines), decision);
 		expect(calls).toHaveLength(2);
-		expect(calls[1]).toEqual(["main | tier=standard | dedupe-p/m", "uvi: dedupe-p 50% left"]);
+		expect(calls[1]).toEqual(["main | tier=常规开发 (standard) | dedupe-p/m", "uvi: dedupe-p 50% left"]);
 		rmSync(dir, { recursive: true, force: true });
 	});
 });

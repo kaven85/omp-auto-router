@@ -1,11 +1,44 @@
 # Changelog
 
 
+## [0.7.0] - 2026-08-24
+
+### Added
+
+- **Role routing (profile >> role)**: profiles gain an optional `roles` map so omp `modelRoles` can point each role at `auto-router/<profile>/<role>` — a profile picks the provider set, the role picks the chain inside it. Two role forms: a fixed `targets` chain (classification and LLM adjudication skipped, zero overhead) or `tierFloor`/`tierCap` soft clamps (classification runs as usual, result bounded). Shortcut pins (`@fast`/`@swe`/`@reasoning`) always escape both forms into the classified tier; undeclared roles route as `default`; `roles.default` may clamp the main session itself. Thinking precedence is target > role > tier.
+- Virtual model registration now expands to profile × declared roles (`Auto Router: <profile> (<role>)` in `/model`); the bare `auto-router/<profile>` id is unchanged and equivalent to the `default` role.
+- Role visibility: the status line shows `<profile>/<role>` for non-default roles, `/auto-router explain` prints `role=`, and decision events carry `role`.
+- `/auto-router doctor` now probes `modelRoles`↔profile consistency (omp): it reads the user/project `config.yml` layers and flags dangling profile references (❌ with the available profile list), role segments not declared in the profile (⚠️ — they silently route as the default chain), and routed virtual models missing from the host registry (❌ pointing at H1). Entries pointed at real providers are ignored.
+
+### Changed
+
+- LLM adjudication of mixed-phase prompts now runs only for the `default` role — subagent/lightweight roles no longer spend an extra LLM call on tier ambiguity.
+
+### Compatibility
+
+- Existing configs are untouched: profiles without `roles` behave exactly as before, and `auto-router/<profile>` keeps its meaning. `RoutingDecision` gains a required `role` field; persisted legacy decisions without it display as `default`.
+
+### Fixed
+
+- **Trivial prompts no longer escalate with session context**: the short-Q&A signal measured the *context* estimate, which never fires in real sessions (the system prompt alone exceeds 200 tokens) — so a "你是谁" at 150k context hit `epic context` (weight 3) and routed to the top tier. The signal now measures the prompt itself, and a short general Q&A suppresses the context-size signal entirely. Context size is treated as a window capability, not a reasoning tier: epic contexts (≥100k tokens) auto-set a `minContextWindow` requirement (mirroring `@long`) and cap the classifier tier at `standard` — multi-step phrasing is the only path to `complex`. When the resolved tier's models are all smaller than the requirement, routing escalates to the nearest higher tier with a fitting window (same pattern as the reasoning guarantee).
+- **Pi terminal error events now unwrap to their real message**: a pre-content `{type:"error", reason:"error"}` event carries its text at `error.errorMessage`, which `extractMessage` didn't read — so `formatError` fell back to a raw JSON dump (thinking content included) in cooldown reasons and event logs, and `defaultIsRetryable` saw no message at all, classifying transient socket failures as non-retryable and suppressing failover to the next candidate. `extractMessage` now reads top-level and nested `errorMessage`.
+
+### Removed
+
+- **Duplicate config loader**: the omp adapter's `assemble`/`readConfigFileSync`/`DEFAULT_CONFIG` duplicated `src/runtime/config.ts`; omp now wires only its paths (`.omp`, `PI_CODING_AGENT_DIR`) onto the single shared loader, including a new sync user+project variant `loadRouterConfigurationSync`.
+- **Duplicate path activation**: `src/runtime/activation.ts` and `ProfileRegistry`'s private copy implemented the same `activate[].path` rule; the shared `matchPathActivation` now lives once in `src/core/profile-registry.ts` and both adapters + the registry use it.
+- **Dead `conversationDepth` parameter**: declared in three types and passed through `pipeline`/`router-runtime`, but never read by `classifyComplexity`; removed along with the unused `RoutingContext` interface.
+- **Duplicate target enumeration**: `runtime/commands.ts`'s private `getConfiguredTargets` duplicated `adapter-kit.configuredTargets`; both now use the single registry-based implementation.
+- **Duplicate adjudication constants** (`ADJUDICATION_TIMEOUT_MS`/`ADJUDICATION_MAX_CHARS`): hoisted to `src/core/llm-adjudication.ts` and shared by both adapters.
+- **Duplicate model metadata**: the omp command fallback rebuilt `VIRTUAL_MODEL_BASE` inline; it now reuses the exported constant. Duplicate `OmpProviderStreamModel` type (byte-identical to `OmpModel`) and the unused `src/core/index.ts` barrel removed.
+- **Dead imports** across core/runtime/adapter and three test files (verified via `tsc --noUnusedLocals`).
+
+
 ## [0.6.0] - 2026-08-14
 
 ### Added
 
-- Pi host adapter (`src/pi-adapter`): the package now declares a second host entry (`pi.extensions`) and runs on Pi via **public-interface Mode A delegation** — real providers are reached only through Pi's public ModelRegistry/Provider surface (`find` / `getProvider` / `getApiKeyAndHeaders`); no host source is modified, patched, or vendored. Profiles appear in the Pi model selector as `auto-router/<profile>`, `/auto-router use <profile>` switches via the model registry, and the full `/auto-router` command set is at parity with omp.
+- Pi host adapter (`src/pi-adapter`): the package now declares a second host entry (`pi.extensions`) and runs on Pi via **public-interface stream delegation** — real providers are reached only through Pi's public ModelRegistry/Provider surface (`find` / `getProvider` / `getApiKeyAndHeaders`); no host source is modified, patched, or vendored. Profiles appear in the Pi model selector as `auto-router/<profile>`, `/auto-router use <profile>` switches via the model registry, and the full `/auto-router` command set is at parity with omp.
 - Pi lifecycle wiring: project-layer config (`<repo>/.pi/auto-router.yml`) loads only for trusted projects (untrusted projects are ignored and `doctor` says so), `/auto-router reload` re-reads both layers, persisted decisions survive session resume/branch (tree restore), trackers persist on `session_shutdown`, and `activate:` path activation (longest-prefix match) works on `session_start`.
 - Shared RouterRuntime (`src/runtime`): orchestration, failover, budgets, commands, widget, and config now live in one host-neutral implementation consumed by both adapters. Command behavior, the env-var dictionary, and the provider dictionary are unified across hosts.
 - Neutral, versioned custom session entry types: new writes use `com.auto-router.v1.decision` / `com.auto-router.v1.state`; legacy omp `com.omp.auto-router.*` entries are still read back.
@@ -150,4 +183,4 @@
 
 ## [0.0.1] - 2026-08-01
 
-- Initial release: profile-based, complexity-aware auto router core and omp adapter (Mode A virtual provider).
+- Initial release: profile-based, complexity-aware auto router core and omp adapter (virtual provider).

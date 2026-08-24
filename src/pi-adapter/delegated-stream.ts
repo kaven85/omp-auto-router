@@ -1,5 +1,5 @@
 /**
- * Pi Mode A public-interface delegation seam.
+ * Pi public-interface delegation seam.
  *
  * This module deliberately uses only the documented ModelRegistry and Provider
  * methods. It neither imports Pi internals nor needs access to a host runtime.
@@ -39,14 +39,14 @@ export interface PiPublicProvider {
 	): AsyncIterable<unknown>;
 }
 
-/** Documented public subset of Pi's ModelRegistry used for Mode A. */
+/** Documented public subset of Pi's ModelRegistry used for delegation. */
 export interface PiPublicModelRegistry {
 	find?: (provider: string, model: string) => PiPublicModel | undefined;
 	getProvider?: (provider: string) => PiPublicProvider | undefined;
 	getApiKeyAndHeaders?: (model: PiPublicModel) => Promise<PiResolvedAuth | PiFailedAuth>;
 }
 
-export interface PiModeACapabilities {
+export interface PiDelegationCapabilities {
 	supported: boolean;
 	missing: string[];
 }
@@ -62,10 +62,10 @@ const REQUIRED_CAPABILITIES = ["find", "getProvider", "getApiKeyAndHeaders"] as 
 const VIRTUAL_AUTH_OPTIONS = new Set(["apiKey", "headers", "env", "reasoning"]);
 
 /**
- * Check the small public capability set required for same-request Mode A
+ * Check the small public capability set required for same-request
  * delegation. This is a feature probe, not a Pi version check.
  */
-export function inspectPiModeACapabilities(registry: PiPublicModelRegistry): PiModeACapabilities {
+export function inspectPiDelegationCapabilities(registry: PiPublicModelRegistry): PiDelegationCapabilities {
 	const missing = REQUIRED_CAPABILITIES.filter((name) => typeof registry[name] !== "function");
 	return { supported: missing.length === 0, missing: [...missing] };
 }
@@ -83,10 +83,10 @@ export async function delegatePiTarget(
 	/** Router-selected controls, applied only after virtual fields are removed. */
 	targetOptions?: Record<string, unknown>,
 ): Promise<AsyncIterable<unknown>> {
-	const capabilities = inspectPiModeACapabilities(registry);
+	const capabilities = inspectPiDelegationCapabilities(registry);
 	if (!capabilities.supported) {
 		throw new PiDelegationError(
-			`Pi Mode A delegation requires public ModelRegistry capability: ${capabilities.missing[0]}`,
+			`Pi delegation requires public ModelRegistry capability: ${capabilities.missing[0]}`,
 		);
 	}
 	if (target.provider === "auto-router") {

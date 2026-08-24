@@ -1,5 +1,5 @@
 /**
- * omp-auto-router extension entry (Mode A).
+ * omp-auto-router extension entry.
  *
  * Load phase (synchronous — must finish before omp resolves models):
  *   sync-load config → state → register virtual provider `auto-router`
@@ -15,22 +15,26 @@
 import * as path from "node:path";
 
 import type { AdapterState } from "./state";
-import { createAdapterState, refreshModels, collectProfileBudgets, persistTrackers } from "./state";
+import { createAdapterState, refreshModels } from "./state";
+import { persistRuntimeTrackers } from "../runtime/state";
 import { agentDir, loadAdapterConfigSync } from "./config";
 import { registerCommands } from "./commands";
 import { createStreamHandler } from "./router";
 import { createHostPorts } from "./host-ports";
 import type { OmpExtensionApi, OmpExtensionContext, OmpProviderConfig } from "./omp-api";
-import { pickSafeEvent, redactSecrets } from "../core/redact";
-import type { RoutingDecision } from "../core/types";
-import { matchPathActivation } from "../runtime/activation";
+import { pickSafeEvent } from "../core/redact";
+import { matchPathActivation } from "../core/profile-registry";
 import { quotaRefreshMs } from "../runtime/env";
 import { renderRouterWidget } from "../runtime/widget";
-import { LEGACY_OMP_DECISION_ENTRY, ROUTER_DECISION_ENTRY } from "../runtime/router-runtime";
-
-/** Placeholder endpoint/key: the virtual provider never sends requests itself. */
-const VIRTUAL_BASE_URL = "http://127.0.0.1:0";
-const VIRTUAL_API_KEY = "OMP_AUTO_ROUTER_VIRTUAL_KEY";
+import {
+	buildVirtualModels,
+	configuredTargets,
+	decisionEntries,
+	recordTestOutcome,
+	TEST_COMMAND_RE,
+	VIRTUAL_API_KEY,
+	VIRTUAL_BASE_URL,
+} from "../runtime/adapter-kit";
 
 /** Handle of the background quota-refresh timer; at most one runs per process. */
 let quotaRefreshTimer: unknown;
@@ -52,16 +56,11 @@ export async function refreshQuotaAndRender(
 ): Promise<void> {
 	const current = stateRef.current;
 	if (!current?.ctx) return;
-	const providers = new Set<string>();
-	for (const entry of current.registry.list()) {
-		const profile = current.registry.profile(entry.name);
-		if (!profile) continue;
-		for (const tier of Object.values(profile.tiers)) {
-			for (const target of tier.targets ?? []) providers.add(target.provider);
-		}
-	}
+	// Tier targets plus fixed-role chains — role-only providers need warmed
+	// quota snapshots just as much as tier providers.
+	const providers = new Set(configuredTargets(current.registry).map((target) => target.provider));
 	if (providers.size === 0) return;
-	const host = createHostPorts(pi, current.ctx, current);
+	const host = createHostPorts(current.ctx, current);
 	try {
 		const snapshots = await host.fetchQuota([...providers]);
 		current.quotaCache = { at: Date.now(), data: snapshots };
@@ -87,6 +86,12 @@ function stopQuotaRefresh(ctx: OmpExtensionContext): void {
 	}
 }
 
+/** Provider models can only be registered during OMP's load phase. */
+function virtualModelCatalog(profiles: Parameters<typeof buildVirtualModels>[0]): string {
+	return buildVirtualModels(profiles).map((model) => model.id).sort().join("\u0000");
+}
+
+
 export default function autoRouterExtension(pi: OmpExtensionApi): void {
 	pi.setLabel("Auto Router");
 
@@ -101,15 +106,7 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 	// ── Virtual provider registration (LOAD PHASE — before model resolution).
 	//    Metadata is static (cosmetic for /model display); the pipeline routes
 	//    against real models resolved per request.
-	const models: NonNullable<OmpProviderConfig["models"]> = Object.keys(state.config.profiles).map((name) => ({
-		id: name,
-		name: `Auto Router: ${name}`,
-		reasoning: true,
-		input: ["text", "image"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 200_000,
-		maxTokens: 16_384,
-	}));
+	const models: NonNullable<OmpProviderConfig["models"]> = buildVirtualModels(state.config.profiles);
 
 	try {
 		pi.registerProvider("auto-router", {
@@ -143,8 +140,15 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 			const current = stateRef.current;
 			const cwd2 = current?.cwd ?? process.cwd();
 			const loaded2 = loadAdapterConfigSync(cwd2);
+			// OMP indexes provider models during the synchronous load phase. Do not
+			// install a config that advertises profiles/roles the host cannot select.
+			if (current && virtualModelCatalog(current.config.profiles) !== virtualModelCatalog(loaded2.config.profiles)) {
+				return Promise.resolve([
+					...loaded2.errors,
+					"virtual model catalog changed; restart OMP to apply profile/role additions or removals",
+				]);
+			}
 			const fresh = createAdapterState(loaded2.config, path.join(agentDir(), "auto-router"), cwd2, loaded2.errors);
-			fresh.budgets.mergeProfileLimits(collectProfileBudgets(fresh.config));
 			if (current?.ctx) {
 				fresh.ctx = current.ctx;
 				refreshModels(fresh, current.ctx);
@@ -207,7 +211,11 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 		const pathProfile = matchPathActivation(current.config, ctx.cwd);
 		if (pathProfile) {
 			const activeModel = ctx.models.current();
-			const already = activeModel?.provider === "auto-router" && activeModel.id === pathProfile;
+			// A role-scoped virtual model (`<profile>/<role>`) of the activated
+			// profile already satisfies the activation — don't reset its role.
+			const already =
+				activeModel?.provider === "auto-router" &&
+				current.registry.parseVirtualModelId(activeModel.id).profile === pathProfile;
 			if (!already) {
 				const ok = await pi.setModel({ provider: "auto-router", id: pathProfile, api: "auto-router" });
 				if (ok) {
@@ -264,14 +272,11 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 		const current = stateRef.current;
 		if (!current) return;
 		if (current.ctx) stopQuotaRefresh(current.ctx);
-		persistTrackers(current);
+		persistRuntimeTrackers(current);
 	});
-	// Reserved for Mode B (setModel-based routing) — inert in Mode A.
-	pi.on("input", () => {});
 
 	// Test/build outcome detection: a failed test command temporarily raises
-	// the tier floor (see TEST_FAILURE_ESCALATION_MS in router.ts) — debugging
-	// benefits from a stronger model; a passing run clears the escalation.
+	// the tier floor (see TEST_FAILURE_ESCALATION_MS in router-runtime).
 	pi.on("tool_result", (event) => {
 		const current = stateRef.current;
 		if (!current || typeof event !== "object" || event === null) return;
@@ -282,27 +287,11 @@ export default function autoRouterExtension(pi: OmpExtensionApi): void {
 				? input.command
 				: "";
 		if (!TEST_COMMAND_RE.test(command)) return;
-		const failed = "isError" in event && event.isError === true;
-		current.testFailureAt = failed ? Date.now() : undefined;
-		current.eventLog.append({
-			type: failed ? "error" : "decision",
-			at: Date.now(),
-			what: failed ? "test-failure" : "test-pass",
-			command: redactSecrets(command.slice(0, 200)),
-		});
+		recordTestOutcome(current, command, "isError" in event && event.isError === true);
 	});
 }
 
-/** Matches common test/build invocations in bash tool commands. */
-const TEST_COMMAND_RE =
-	/\b(?:bun|npm|pnpm|yarn)\s+(?:run\s+)?(?:test|build)\b|\b(?:vitest|jest|pytest|go\s+test|cargo\s+test)\b|\btsc\b/;
-
 function restoreDecisions(state: AdapterState, ctx: OmpExtensionContext): void {
-	const prior: RoutingDecision[] = [];
-	for (const entry of ctx.sessionManager.getBranch()) {
-		if (entry.type === "custom" && (entry.customType === ROUTER_DECISION_ENTRY || entry.customType === LEGACY_OMP_DECISION_ENTRY)) {
-			prior.push(entry.data as RoutingDecision);
-		}
-	}
+	const prior = decisionEntries(ctx.sessionManager.getBranch());
 	if (prior.length > 0) state.decisions.restore(prior);
 }

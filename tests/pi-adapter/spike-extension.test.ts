@@ -13,7 +13,7 @@ const realModel = {
 	maxTokens: 16_384,
 };
 
-describe("Pi Mode A spike extension", () => {
+describe("Pi spike extension", () => {
 	test("registers a selectable virtual model and delegates it to the preceding real model", async () => {
 		const providers = new Map<string, Record<string, unknown>>();
 		const handlers = new Map<string, (event: unknown, ctx: unknown) => void | Promise<void>>();

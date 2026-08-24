@@ -8,14 +8,11 @@
  */
 
 import { homedir } from "node:os";
-import type { ComplexityTier, ProfileConfig, RouterConfig, TierConfig } from "./types";
+import type { ComplexityTier, ProfileConfig, RoleConfig, RouteTarget, RouterConfig, TierConfig } from "./types";
+import { COMPLEXITY_TIERS } from "./types";
 
-/**
- * Tier ladder from least to most complex. `tierConfig()` fallback walks UP
- * this ladder first (toward "complex", nearest rung first), then DOWN
- * (toward "trivial", nearest rung first).
- */
-const TIER_LADDER: readonly ComplexityTier[] = ["trivial", "simple", "standard", "complex"];
+/** Role assumed when the virtual model id carries no role segment. */
+export const DEFAULT_ROLE = "default";
 
 /** The resolved active profile and its name. */
 export interface ActiveProfile {
@@ -43,9 +40,9 @@ export interface ProfileRegistryOptions {
  * serve every tier.
  */
 function tierSearchOrder(tier: ComplexityTier): ComplexityTier[] {
-	const idx = TIER_LADDER.indexOf(tier);
-	const up = TIER_LADDER.slice(idx);
-	const down = TIER_LADDER.slice(0, idx).reverse();
+	const idx = COMPLEXITY_TIERS.indexOf(tier);
+	const up = COMPLEXITY_TIERS.slice(idx);
+	const down = COMPLEXITY_TIERS.slice(0, idx).reverse();
 	return [...up, ...down];
 }
 
@@ -59,6 +56,35 @@ function expandHome(path: string): string {
 /** Segment-aware prefix match: `/a/b` matches `/a/b` and `/a/b/c`, not `/a/bc`. */
 function pathPrefixMatches(prefix: string, cwd: string): boolean {
 	return cwd === prefix || cwd.startsWith(`${prefix}/`);
+}
+
+/**
+ * Longest `activate[].path` prefix of cwd, `~` expanded; undefined when none
+ * match. The single implementation of path activation — both adapters and the
+ * registry's own active-profile resolution go through it.
+ */
+export function matchPathActivation(config: RouterConfig, cwd: string): string | undefined {
+	const entries = config.activate;
+	if (!entries || entries.length === 0) return undefined;
+	let best: { len: number; profile: string } | undefined;
+	for (const entry of entries) {
+		if (!config.profiles[entry.profile]) continue;
+		const expanded = expandHome(entry.path).replace(/\/+$/, "");
+		if (expanded.length === 0) continue;
+		if (!pathPrefixMatches(expanded, cwd)) continue;
+		if (best === undefined || expanded.length > best.len) {
+			best = { len: expanded.length, profile: entry.profile };
+		}
+	}
+	return best?.profile;
+}
+
+/** Every route target a profile can serve: tier targets plus fixed role chains. */
+export function profileTargets(profile: ProfileConfig): RouteTarget[] {
+	return [
+		...Object.values(profile.tiers).flatMap((tier) => tier?.targets ?? []),
+		...Object.values(profile.roles ?? {}).flatMap((role) => role.targets ?? []),
+	];
 }
 
 /**
@@ -114,6 +140,30 @@ export class ProfileRegistry {
 		return this.config.profiles[name];
 	}
 
+	/** Role config inside a profile, or undefined when the role is undeclared. */
+	roleConfig(profileName: string, role: string): RoleConfig | undefined {
+		return this.config.profiles[profileName]?.roles?.[role];
+	}
+
+	/**
+	 * Split a virtual model id (`<profile>` or `<profile>/<role>`) into its
+	 * parts. Profile names are matched registry-aware: the full id wins, then
+	 * the longest `head/role` split whose head is a known profile. Unknown
+	 * profiles come back as `{ profile: id, role: "default" }` so the runtime
+	 * can report the unknown profile rather than mis-slicing the id.
+	 */
+	parseVirtualModelId(id: string): { profile: string; role: string } {
+		if (this.config.profiles[id] !== undefined) return { profile: id, role: DEFAULT_ROLE };
+		const slash = id.lastIndexOf("/");
+		if (slash > 0 && slash < id.length - 1) {
+			const head = id.slice(0, slash);
+			if (this.config.profiles[head] !== undefined) {
+				return { profile: head, role: id.slice(slash + 1) };
+			}
+		}
+		return { profile: id, role: DEFAULT_ROLE };
+	}
+
 	/** All profiles with an isActive flag, in config order. */
 	list(): ProfileListEntry[] {
 		const currentName = this.current();
@@ -167,18 +217,6 @@ export class ProfileRegistry {
 
 	/** Longest matching `activate[].path` prefix of cwd wins; `~` expanded. */
 	private matchPathActivation(): string | undefined {
-		const entries = this.config.activate;
-		if (entries === undefined || entries.length === 0) return undefined;
-		let best: { length: number; profile: string } | undefined;
-		for (const entry of entries) {
-			if (this.config.profiles[entry.profile] === undefined) continue;
-			const expanded = expandHome(entry.path).replace(/\/+$/, "");
-			if (expanded.length === 0) continue;
-			if (!pathPrefixMatches(expanded, this.cwd)) continue;
-			if (best === undefined || expanded.length > best.length) {
-				best = { length: expanded.length, profile: entry.profile };
-			}
-		}
-		return best?.profile;
+		return matchPathActivation(this.config, this.cwd);
 	}
 }

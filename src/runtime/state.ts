@@ -1,20 +1,31 @@
 import { BudgetTracker } from "../core/budget-tracker";
 import { CircuitBreaker } from "../core/circuit-breaker";
-import { sanitizeClassifierOverrides } from "../core/complexity-classifier";
+import { sanitizeClassifierOverrides, type ClassifierOverrides } from "../core/complexity-classifier";
 import { DecisionStore } from "../core/decision-store";
 import { EventLog } from "../core/event-log";
 import { FeedbackTracker } from "../core/feedback-tracker";
 import { LatencyTracker } from "../core/latency-tracker";
 import { ProfileRegistry } from "../core/profile-registry";
 import { JsonStateStore } from "../core/state-store";
-import type { BudgetLimit, BudgetUsage, RatingEntry, RouterConfig } from "../core/types";
+import type { BudgetLimit, BudgetUsage, QuotaSnapshot, RatingEntry, RouterConfig } from "../core/types";
 import { cooldownAfterFailureMs } from "./env";
+import type { ProviderBalance } from "./provider-dictionary";
 import type { RouterRuntimeState } from "./router-runtime";
 
+/**
+ * Runtime state with every field the factory below always initializes
+ * redeclared as required, so adapters can build on it without re-wiring.
+ */
 export interface PersistentRuntimeState extends RouterRuntimeState {
 	config: RouterConfig;
 	stateStore: JsonStateStore;
 	configErrors: string[];
+	uviEnabled: boolean;
+	shadowEnabled: boolean;
+	cooldownAfterFailureMs: number;
+	quotaCache: { at: number; data: QuotaSnapshot[] };
+	balanceCache: Record<string, ProviderBalance>;
+	classifierOverrides: ClassifierOverrides;
 }
 
 export function createPersistentRuntimeState(config: RouterConfig, stateDir: string, cwd: string, configErrors: string[] = []): PersistentRuntimeState {
@@ -60,4 +71,9 @@ export function createPersistentRuntimeState(config: RouterConfig, stateDir: str
 export function persistRuntimeTrackers(state: PersistentRuntimeState): void {
 	state.stateStore.writeJson("circuit.json", state.circuit.snapshot());
 	state.stateStore.writeJson("first-output-latency.json", state.latency.snapshot());
+}
+
+/** Persist classifier keyword overrides (`/auto-router rules add/remove/reset`). */
+export function persistClassifierOverrides(state: PersistentRuntimeState): void {
+	state.stateStore.writeJson("classifier-rules.json", state.classifierOverrides);
 }

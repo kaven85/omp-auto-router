@@ -44,7 +44,7 @@ describe("fetchQuota", () => {
 				{ provider: "anthropic", fetchedAt: 1_000, limits: [{ id: "5h", amount: { usedFraction: 0.42 }, window: { windowSeconds: 18_000, resetsAt: 9_999 } }] },
 			]),
 		});
-		const host = createHostPorts(api, ctx, state);
+		const host = createHostPorts(ctx, state);
 		const out = await host.fetchQuota(["anthropic"]);
 		expect(out).toEqual([
 			{
@@ -63,7 +63,7 @@ describe("fetchQuota", () => {
 				{ provider: "google", limits: [{ id: "day", amount: { used: 30, limit: 60 } }] },
 			]),
 		});
-		const host = createHostPorts(api, ctx, state);
+		const host = createHostPorts(ctx, state);
 		const out = await host.fetchQuota(["google"]);
 		expect(out[0]?.windows).toEqual([{ id: "day", usedFraction: 0.5 }]);
 		rmSync(dir, { recursive: true, force: true });
@@ -77,7 +77,7 @@ describe("fetchQuota", () => {
 				{ provider: "deepseek", limits: [{ id: "x", amount: { usedFraction: 0.1 } }] },
 			]),
 		});
-		const host = createHostPorts(api, ctx, state);
+		const host = createHostPorts(ctx, state);
 		const out = await host.fetchQuota(["anthropic"]);
 		expect(out).toEqual([
 			{ provider: "anthropic", fetchedAt: out[0]!.fetchedAt, windows: [] },
@@ -92,7 +92,7 @@ describe("fetchQuota", () => {
 				throw new Error("auth down");
 			}),
 		});
-		const host = createHostPorts(api, ctx, state);
+		const host = createHostPorts(ctx, state);
 		const out = await host.fetchQuota(["anthropic"]);
 		expect(out).toEqual([]);
 		rmSync(dir, { recursive: true, force: true });
@@ -110,7 +110,7 @@ describe("enrichCandidates", () => {
 		const { api, state, dir } = setup();
 		api.models = [{ provider: "anthropic", id: "sonnet", api: "anthropic-messages" }];
 		const ctx = api.makeCtx();
-		const host = createHostPorts(api, ctx, state);
+		const host = createHostPorts(ctx, state);
 		const out = enrichCandidates(host, TARGETS);
 		expect(out.map((c) => c.key)).toEqual(["anthropic/sonnet", "missing/ghost"]);
 		rmSync(dir, { recursive: true, force: true });
@@ -129,7 +129,7 @@ describe("enrichCandidates", () => {
 			},
 		];
 		const ctx = api.makeCtx();
-		const host = createHostPorts(api, ctx, state);
+		const host = createHostPorts(ctx, state);
 		const out = enrichCandidates(host, TARGETS);
 		expect(out[0]?.healthy).toBe(true);
 		expect(out[0]?.capabilities?.reasoning).toBe(true);

@@ -1,6 +1,6 @@
 # 04 — 完善 Pi target 流语义
 
-**What to build:** 将 Pi 最小路由扩展为可安全用于真实多 Provider profile 的 Mode A 实现，使认证、模型作用域、thinking、failover、错误和取消语义与 Router Runtime 的约定一致。
+**What to build:** 将 Pi 最小路由扩展为可安全用于真实多 Provider profile 的流委托实现，使认证、模型作用域、thinking、failover、错误和取消语义与 Router Runtime 的约定一致。
 
 **Blocked by:** 03 — 交付 Pi 最小可用路由
 

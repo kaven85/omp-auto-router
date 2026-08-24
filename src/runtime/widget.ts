@@ -8,7 +8,7 @@
  * provider balance endpoints, not host usage reports.
  */
 
-import type { RoutingDecision } from "../core/types";
+import { formatComplexityTier, type RoutingDecision } from "../core/types";
 import type { RouterRuntimeState } from "./router-runtime";
 
 function observedLatencySuffix(state: RouterRuntimeState, decision: RoutingDecision): string {
@@ -28,7 +28,7 @@ export function buildWidgetLines(state: RouterRuntimeState, decision?: RoutingDe
 	if (decision !== undefined) {
 		const billing = decision.target.billing === "per-token" ? " (per-token)" : "";
 		lines.push(
-			`${decision.profile} | tier=${decision.tier} | ${decision.target.provider}/${decision.target.model}${billing}${decision.thinking !== undefined ? ` | ${decision.thinking}` : ""}${observedLatencySuffix(state, decision)}`,
+			`${decision.profile} | tier=${formatComplexityTier(decision.tier)} | ${decision.target.provider}/${decision.target.model}${billing}${decision.thinking !== undefined ? ` | ${decision.thinking}` : ""}${observedLatencySuffix(state, decision)}`,
 		);
 	}
 	const budgetBits: string[] = [];

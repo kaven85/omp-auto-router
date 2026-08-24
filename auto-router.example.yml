@@ -31,6 +31,15 @@ profiles:
         targets:
           - { provider: anthropic, model: claude-opus-4-5 }
           - { provider: google, model: gemini-3.1-pro, billing: per-token }
+    # 角色路由（可选）：omp modelRoles 指向 auto-router/premium/<role> 生效。
+    # 固定链（targets）跳过分类；tierFloor/tierCap 为分类结果钳界；钉层永远可逃逸。
+    roles:
+      task:   # 子代理固定走便宜链，零分类开销
+        thinking: low
+        targets:
+          - { provider: deepseek, model: deepseek-v4-flash, billing: per-token }
+      smol: { tierCap: simple }      # 标题/记忆等轻量任务：照常分类但封顶 simple
+      slow: { tierFloor: complex }   # 慢速深思考角色：保底 complex
     budgets:
       google: { amount: 20, monthly: true }
     rules:

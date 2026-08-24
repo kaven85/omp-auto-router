@@ -26,6 +26,7 @@ afterEach(() => {
 function decisionFixture(overrides: Partial<RoutingDecision> = {}): RoutingDecision {
 	return {
 		profile: "base",
+		role: "default",
 		tier: "standard",
 		confidence: 0.8,
 		target: { provider: "alpha", model: "a1" },

@@ -7,6 +7,7 @@ import type { RoutingDecision } from "../src/core/types";
 function makeDecision(decidedAt: number, profile = "default"): RoutingDecision {
 	return {
 		profile,
+		role: "default",
 		tier: "standard",
 		confidence: 0.9,
 		target: { provider: "anthropic", model: "claude" },

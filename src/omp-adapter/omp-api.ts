@@ -75,23 +75,12 @@ export interface OmpExtensionContext {
 	clearTimer(handle: unknown): void;
 }
 
-export interface OmpProviderStreamModel {
-	provider: string;
-	id: string;
-	api: string;
-	reasoning?: boolean;
-	input?: ("text" | "image")[];
-	contextWindow?: number;
-	maxTokens?: number;
-	cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
-}
-
 export interface OmpProviderConfig {
 	baseUrl?: string;
 	api?: string;
 	apiKey?: string;
 	streamSimple?: (
-		model: OmpProviderStreamModel,
+		model: OmpModel,
 		context: unknown,
 		options?: { signal?: AbortSignal; [k: string]: unknown },
 	) => AsyncIterable<{ type: string; [k: string]: unknown }>;

@@ -69,3 +69,12 @@ export function parseShortcut(prompt: string): ShortcutResult {
 	if (profileOverride !== undefined) result.profileOverride = profileOverride;
 	return result;
 }
+
+/**
+ * Tier-pinning shortcuts (`@fast`/`@swe`/`@reasoning`): the user's
+ * request-scoped tier intent. Pins outrank role config (they escape fixed
+ * chains and tier clamps) and policy force-tiers. `@long`/`@vision` are
+ * capability requirements, not tier pins. Single source for the pin set —
+ * pipeline checks `TIER_PIN_SHORTCUTS.includes(token)`.
+ */
+export const TIER_PIN_SHORTCUTS: readonly ShortcutToken[] = ["@fast", "@swe", "@reasoning"] as const;

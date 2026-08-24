@@ -1,5 +1,5 @@
 /**
- * Failover engine — the heart of Mode A.
+ * Failover engine — the heart of stream delegation.
  *
  * Walks an ordered candidate chain, delegating actual streaming to the host
  * via StreamFactory. A target that fails (thrown error or terminal error
@@ -61,16 +61,18 @@ function extractMessage(error: unknown): string | undefined {
 	if (typeof error === "string") return error;
 	if (typeof error !== "object" || error === null) return undefined;
 	if ("message" in error && typeof error.message === "string") return error.message;
+	if ("errorMessage" in error && typeof error.errorMessage === "string") return error.errorMessage;
 	if ("error" in error) {
 		const inner: unknown = error.error;
 		if (typeof inner === "string") return inner;
-		if (
-			typeof inner === "object" &&
-			inner !== null &&
-			"message" in inner &&
-			typeof inner.message === "string"
-		) {
-			return inner.message;
+		if (typeof inner === "object" && inner !== null) {
+			// pi terminal error events carry the message at error.errorMessage.
+			if ("errorMessage" in inner && typeof inner.errorMessage === "string") {
+				return inner.errorMessage;
+			}
+			if ("message" in inner && typeof inner.message === "string") {
+				return inner.message;
+			}
 		}
 	}
 	return undefined;
@@ -166,6 +168,7 @@ export async function* failoverStream(
 		attempted.push(target.label ?? `${target.provider}/${target.model}`);
 
 		let substantive = false;
+		let settled = false;
 		let failed = false;
 		let failedError: unknown;
 		let failedEvent: StreamEventLike | undefined;
@@ -189,7 +192,15 @@ export async function* failoverStream(
 		if (stream !== undefined) {
 			try {
 				for await (const event of stream) {
-					if (!substantive && event.type === "error") {
+					if (event.type === "error") {
+						if (substantive) {
+							// Output has already escaped, so failover would duplicate it;
+							// still report real terminal failures for circuit/cooldown health.
+							// User aborts are never target-health signals.
+							if (event.reason !== "aborted") hooks.onTargetFailed?.(target, event);
+							yield event;
+							return;
+						}
 						// terminal error event before any content
 						failed = true;
 						failedError = event;
@@ -211,7 +222,14 @@ export async function* failoverStream(
 						}
 						if (hooks.isSubstantive(event)) {
 							substantive = true;
-							hooks.onTargetSettled?.(target);
+							hooks.onTargetOutput?.(target);
+							// `done` is terminal in both host stream contracts. Settle
+							// before yielding it because consumers may stop iterating as
+							// soon as they receive the terminal event.
+							if (event.type === "done") {
+								hooks.onTargetSettled?.(target);
+								settled = true;
+							}
 							yield* flush();
 						}
 						continue;
@@ -219,7 +237,14 @@ export async function* failoverStream(
 					yield event;
 				}
 			} catch (error) {
-				if (substantive) throw error; // pass-through: failover is over
+				if (substantive) {
+					// Pass through after visible output, but do not leave the target
+					// recorded as healthy merely because it produced a partial answer.
+					// AbortError remains a user/host cancellation, not a health failure.
+					const aborted = typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
+					if (!aborted) hooks.onTargetFailed?.(target, error);
+					throw error;
+				}
 				failed = true;
 				failedError = error;
 			}
@@ -227,8 +252,10 @@ export async function* failoverStream(
 
 		if (!failed) {
 			// Clean end (possibly without substantive events): hand over whatever
-			// was buffered so the host sees a complete, ordered stream.
+			// was buffered so the host sees a complete, ordered stream. Health is
+			// restored only after this clean completion, not at first output.
 			yield* flush();
+			if (substantive && !settled) hooks.onTargetSettled?.(target);
 			return;
 		}
 

@@ -7,6 +7,7 @@ import {
 	loadRouterConfigFile,
 	mergeRouterConfigs,
 	parseRouterConfig,
+	stripBalanceEndpointOverrides,
 } from "../src/core/config-loader";
 import type { ProfileConfig, RouterConfig } from "../src/core/types";
 
@@ -61,6 +62,32 @@ activate:
   - path: ~/work
     profile: cheap
 `;
+
+describe("stripBalanceEndpointOverrides", () => {
+	test("strips endpoints from tier targets AND fixed-role targets", () => {
+		const config: RouterConfig = {
+			profiles: {
+				p: {
+					tiers: {
+						standard: {
+							targets: [{ provider: "a", model: "m", balanceEndpoint: "https://evil.example/tier" }],
+						},
+					},
+					roles: {
+						task: {
+							targets: [{ provider: "b", model: "n", balanceEndpoint: "https://evil.example/role" }],
+						},
+					},
+				},
+			},
+		};
+		expect(stripBalanceEndpointOverrides(config)).toBe(2);
+		expect(config.profiles.p!.tiers.standard!.targets[0]).toEqual({ provider: "a", model: "m" });
+		expect(config.profiles.p!.roles!.task!.targets![0]).toEqual({ provider: "b", model: "n" });
+		// A second pass is a no-op.
+		expect(stripBalanceEndpointOverrides(config)).toBe(0);
+	});
+});
 
 describe("parseRouterConfig", () => {
 	test("parses a full valid config", () => {
@@ -453,5 +480,95 @@ describe("loadRouterConfigFile", () => {
 		const { config, errors } = await loadRouterConfigFile(path);
 		expect(config).toBeUndefined();
 		expect(errors.length).toBeGreaterThan(0);
+	});
+});
+
+describe("profile roles", () => {
+	const BASE = `
+profiles:
+  company:
+    defaultTier: standard
+    tiers:
+      standard:
+        targets:
+          - { provider: anthropic, model: sonnet }
+`;
+
+	test("profile names containing slash are rejected to prevent virtual-model collisions", () => {
+		const { config, errors } = parseRouterConfig(`
+profiles:
+  company/task:
+    tiers:
+      standard:
+        targets:
+          - { provider: anthropic, model: sonnet }
+`);
+		expect(config).toBeUndefined();
+		expect(errors.some((error) => error.includes("invalid profile name") && error.includes("/"))).toBe(true);
+	});
+
+
+	test("parses fixed-chain and clamped roles", () => {
+		const { config, errors } = parseRouterConfig(`${BASE}    roles:
+      task:
+        targets:
+          - { provider: deepseek, model: flash }
+        thinking: low
+      slow:
+        tierFloor: complex
+      smol:
+        tierCap: simple
+`);
+		expect(errors).toEqual([]);
+		const roles = config!.profiles.company!.roles!;
+		expect(roles.task?.targets?.[0]).toEqual({ provider: "deepseek", model: "flash" });
+		expect(roles.task?.thinking).toBe("low");
+		expect(roles.slow?.tierFloor).toBe("complex");
+		expect(roles.smol?.tierCap).toBe("simple");
+	});
+
+	test("targets is mutually exclusive with tierFloor/tierCap", () => {
+		const { errors } = parseRouterConfig(`${BASE}    roles:
+      task:
+        targets:
+          - { provider: deepseek, model: flash }
+        tierCap: simple
+`);
+		expect(errors.some((e) => e.includes("mutually exclusive"))).toBe(true);
+	});
+
+	test("tierFloor above tierCap is rejected", () => {
+		const { errors } = parseRouterConfig(`${BASE}    roles:
+      task:
+        tierFloor: complex
+        tierCap: simple
+`);
+		expect(errors.some((e) => e.includes("tierFloor") && e.includes("tierCap"))).toBe(true);
+	});
+
+	test("invalid role names and unsafe keys are rejected", () => {
+		const { errors } = parseRouterConfig(`${BASE}    roles:
+      Bad Name: { tierCap: simple }
+      has/slash: { tierCap: simple }
+      __proto__: { tierCap: simple }
+`);
+		expect(errors.length).toBe(3);
+		expect(errors.some((e) => e.includes("invalid role name"))).toBe(true);
+		expect(errors.some((e) => e.includes("unsafe key"))).toBe(true);
+	});
+
+	test("empty role config is rejected", () => {
+		const { errors } = parseRouterConfig(`${BASE}    roles:
+      task: {}
+`);
+		expect(errors.some((e) => e.includes("empty role config"))).toBe(true);
+	});
+
+	test("unknown clamp tier names are rejected with dotted path", () => {
+		const { errors } = parseRouterConfig(`${BASE}    roles:
+      task:
+        tierCap: huge
+`);
+		expect(errors.some((e) => e.includes("roles.task.tierCap"))).toBe(true);
 	});
 });

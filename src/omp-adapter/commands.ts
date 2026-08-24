@@ -9,10 +9,14 @@
  */
 
 import { buildRouterCompletions, runRouterCommand, type RouterCommandHost } from "../runtime/commands";
+import { persistClassifierOverrides } from "../runtime/state";
+import { VIRTUAL_MODEL_BASE } from "../runtime/adapter-kit";
 import { fetchOmpBalance } from "./balance";
+import { agentDir } from "./config";
 import { createHostPorts } from "./host-ports";
+import { probeModelRoles } from "./model-roles";
 import type { OmpExtensionApi, OmpExtensionContext } from "./omp-api";
-import { persistClassifierOverrides, type AdapterState } from "./state";
+import type { AdapterState } from "./state";
 
 export interface CommandDeps {
 	/** Current adapter state (undefined until session_start boot). */
@@ -48,8 +52,10 @@ function createOmpCommandHost(state: AdapterState, deps: CommandDeps, ctx: OmpEx
 			}
 		},
 		activeVirtualProfile() {
+			// Raw virtual model id (may be `<profile>/<role>`); the shared
+			// command layer reduces it to its profile.
 			const current = state.ctx?.models.current();
-			return current?.provider === "auto-router" && state.registry.profile(current.id) !== undefined ? current.id : undefined;
+			return current?.provider === "auto-router" ? current.id : undefined;
 		},
 		async setVirtualProfile(name) {
 			// Prefer the registered virtual model; fall back to the static
@@ -60,11 +66,7 @@ function createOmpCommandHost(state: AdapterState, deps: CommandDeps, ctx: OmpEx
 					provider: "auto-router",
 					id: name,
 					api: "auto-router",
-					reasoning: true,
-					input: ["text", "image"],
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					contextWindow: 200_000,
-					maxTokens: 16_384,
+					...VIRTUAL_MODEL_BASE,
 				};
 			return deps.pi.setModel(model);
 		},
@@ -82,10 +84,20 @@ function createOmpCommandHost(state: AdapterState, deps: CommandDeps, ctx: OmpEx
 				["H6 ui notify/status", state.doctorProbes.ui, "status line + notifications"],
 				["H7 authStorage quota", state.doctorProbes.quota, "fetchUsageReports → UVI"],
 			];
-			return checks.map(([id, ok, desc]) => `${ok ? "✅" : "⚠️"} ${id} — ${desc}`);
+			return [
+				...checks.map(([id, ok, desc]) => `${ok ? "✅" : "⚠️"} ${id} — ${desc}`),
+				...probeModelRoles({
+					registry: state.registry,
+					agentDir: agentDir(),
+					cwd: state.cwd,
+					isRegistered: (virtualId) =>
+						state.modelsByKey.has(`auto-router/${virtualId}`) ||
+						ctx.models.resolve(`auto-router/${virtualId}`) !== undefined,
+				}),
+			];
 		},
 		quotaAvailable: () => typeof ctx.modelRegistry?.authStorage?.fetchUsageReports === "function",
-		fetchQuota: (providers) => createHostPorts(deps.pi, ctx, state).fetchQuota(providers),
+		fetchQuota: (providers) => createHostPorts(ctx, state).fetchQuota(providers),
 		fetchBalance: (provider, endpoint) => fetchOmpBalance(ctx, state, provider, endpoint),
 		persistClassifierOverrides: () => persistClassifierOverrides(state),
 	};

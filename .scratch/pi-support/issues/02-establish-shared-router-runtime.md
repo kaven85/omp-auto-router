@@ -2,7 +2,7 @@
 
 **What to build:** 在不改变 OMP 用户行为的前提下扩展一个宿主无关的 Router Runtime seam，并让一次完整 OMP 请求通过该 seam 完成分类、candidate chain、流委托、failover 和决策记录，为 Pi Adapter 提供可复用的纵向路径。
 
-**Blocked by:** 01 — 验证 Pi Mode A 公开流委托
+**Blocked by:** 01 — 验证 Pi 公开流委托
 
 **Status:** ready-for-agent
 

@@ -172,3 +172,37 @@ describe("ProfileRegistry.tierConfig ladder fallback", () => {
 		expect(registry.tierConfig("ghost", "standard")).toBeUndefined();
 	});
 });
+
+describe("parseVirtualModelId", () => {
+	const registry = new ProfileRegistry(makeConfig(), { cwd: "/elsewhere" });
+
+	test("bare profile id routes as default role", () => {
+		expect(registry.parseVirtualModelId("premium")).toEqual({ profile: "premium", role: "default" });
+	});
+
+	test("profile/role id splits at the last slash", () => {
+		expect(registry.parseVirtualModelId("premium/task")).toEqual({ profile: "premium", role: "task" });
+		expect(registry.parseVirtualModelId("cheap/smol")).toEqual({ profile: "cheap", role: "smol" });
+	});
+
+	test("unknown profile stays whole so the runtime reports it", () => {
+		expect(registry.parseVirtualModelId("ghost/task")).toEqual({ profile: "ghost/task", role: "default" });
+	});
+
+	test("trailing slash is not a role", () => {
+		expect(registry.parseVirtualModelId("premium/")).toEqual({ profile: "premium/", role: "default" });
+	});
+});
+
+describe("roleConfig", () => {
+	test("returns the declared role config, undefined otherwise", () => {
+		const config = makeConfig();
+		config.profiles.premium!.roles = {
+			task: { targets: [{ provider: "deepseek", model: "flash" }] },
+		};
+		const registry = new ProfileRegistry(config, { cwd: "/elsewhere" });
+		expect(registry.roleConfig("premium", "task")?.targets?.[0]?.model).toBe("flash");
+		expect(registry.roleConfig("premium", "smol")).toBeUndefined();
+		expect(registry.roleConfig("ghost", "task")).toBeUndefined();
+	});
+});
