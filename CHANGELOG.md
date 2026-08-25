@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.7.1] - 2026-08-25
+
+### Fixed
+
+- **Router error events expose `errorMessage` for host retry policies**: `routerErrorEvent` now includes a top-level `errorMessage` field. Pi's retry path reads this field instead of rendered assistant content, so transient router failures are classified as retryable and failover to the next candidate works. The omp adapter stream contract already carried the message in assistant content; tests now assert both hosts surface the text through the new field.
+
 
 ## [0.7.0] - 2026-08-24
 
