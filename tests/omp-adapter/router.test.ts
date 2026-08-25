@@ -600,9 +600,14 @@ describe("adapter router", () => {
 		for await (const event of handler) events.push(event);
 		expect(events).toHaveLength(1);
 		expect(events[0]!.type).toBe("error");
-		// failWith contract: adapter errors carry an assistant message.
-		const errorMessage = events[0]!.error as { content?: Array<{ text?: string }> };
+		// failWith contract: adapter errors carry an assistant message whose text
+		// is also exposed to the host retry policy.
+		const errorMessage = events[0]!.error as {
+			content?: Array<{ text?: string }>;
+			errorMessage?: string;
+		};
 		expect(errorMessage.content?.[0]?.text ?? "").toContain("session context not ready");
+		expect(errorMessage.errorMessage).toContain("session context not ready");
 		rmSync(dir, { recursive: true, force: true });
 	});
 

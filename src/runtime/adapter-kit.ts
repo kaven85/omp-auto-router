@@ -154,6 +154,8 @@ export function routerErrorEvent(model: { api: string; provider: string; id: str
 		type: "error",
 		reason: "error",
 		error: {
+			// Pi's retry policy reads this field, not rendered assistant content.
+			errorMessage: message,
 			role: "assistant",
 			content: [{ type: "text", text: message }],
 			api: model.api,

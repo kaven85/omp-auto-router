@@ -85,6 +85,7 @@ describe("Pi stream contract", () => {
 		expect(error.type).toBe("error");
 		const message = error.error as {
 			provider: string; model: string; stopReason: string; timestamp: number;
+			errorMessage?: string;
 			usage: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: { total: number } };
 			content: Array<{ type: string; text: string }>;
 		};
@@ -93,6 +94,7 @@ describe("Pi stream contract", () => {
 		expect(message.usage).toMatchObject({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 });
 		expect(message.usage.cost.total).toBe(0);
 		expect(message.content[0]?.text).toContain("no eligible candidates");
+		expect(message.errorMessage).toContain("no eligible candidates");
 		expect(h.streamCalls).toEqual([]);
 	});
 
