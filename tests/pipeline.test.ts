@@ -147,6 +147,37 @@ describe("pipeline", () => {
 		expect(result.decision.hints.shortcut).toBe("@reasoning");
 	});
 
+	test("falls back to another tier when every target in the resolved tier is unavailable", () => {
+		const config: RouterConfig = {
+			active: "company",
+			profiles: {
+				company: {
+					defaultTier: "standard",
+					tiers: {
+						standard: { targets: [{ provider: "newapi", model: "deepseek-v4-flash" }] },
+						complex: { thinking: "high", targets: [{ provider: "newapi", model: "gpt-5.6-sol" }] },
+					},
+				},
+			},
+		};
+		const candidates = targetCandidates(allTargets(config)).map(candidate =>
+			candidate.key === "newapi/deepseek-v4-flash" ? { ...candidate, healthy: false } : candidate,
+		);
+		const result = route(
+			{
+				rawPrompt: "implement this feature",
+				hasImages: false,
+				candidates,
+				quota: {},
+				now: NOW,
+			},
+			makeDeps({ registry: new ProfileRegistry(config, { cwd: "/tmp/work" }) }),
+		);
+		expect(result.decision.tier).toBe("complex");
+		expect(result.decision.target).toEqual({ provider: "newapi", model: "gpt-5.6-sol" });
+		expect(result.decision.reasoning.join("\n")).toContain("availability fallback to complex");
+	});
+
 	test("selected target thinking overrides the tier thinking level", () => {
 		const config: RouterConfig = {
 			active: "company",

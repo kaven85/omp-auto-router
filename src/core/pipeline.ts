@@ -321,6 +321,44 @@ export function route(input: PipelineInput, deps: PipelineDeps): PipelineResult 
 		}
 	}
 
+	// 8c. Availability fallback: a tier with no eligible target must not make
+	// the whole profile unusable when another declared tier can serve the same
+	// request. This is deliberately after capability escalation, so a required
+	// capability still prefers the nearest higher capable tier. Fixed chains
+	// remain strict: their exact target list is the operator's contract.
+	if (!fixedChain && !capabilityRequired && eligible.length === 0) {
+		const availabilityTiers = [
+			...COMPLEXITY_TIERS.filter(candidateTier => TIER_RANK[candidateTier] > TIER_RANK[tier]),
+			...COMPLEXITY_TIERS.filter(candidateTier => TIER_RANK[candidateTier] < TIER_RANK[tier]).reverse(),
+		];
+		for (const fallbackTier of availabilityTiers) {
+			if (escalationCap !== undefined && TIER_RANK[fallbackTier] > TIER_RANK[escalationCap]) continue;
+			if (roleCfg?.tierFloor !== undefined && TIER_RANK[fallbackTier] < TIER_RANK[roleCfg.tierFloor]) continue;
+			const fallbackCfg = effectiveProfile.tiers[fallbackTier];
+			if (fallbackCfg === undefined) continue;
+			const fallbackSolved = solveConstraints(declaredCandidates(fallbackCfg.targets), requirement, {
+				circuit: deps.circuit,
+				nowMs,
+				hardUviProviders,
+			});
+			for (const ex of fallbackSolved.excluded) reasoning.push(`excluded ${ex.candidate.key}: ${ex.reason}`);
+			let fallbackEligible = fallbackSolved.eligible;
+			if (pre.excludedProviders.size > 0) {
+				fallbackEligible = fallbackEligible.filter(c => !pre.excludedProviders.has(c.target.provider));
+			}
+			if (pre.billingForce) {
+				const forced = fallbackEligible.filter(c => (c.target.billing ?? "subscription") === pre.billingForce);
+				if (forced.length > 0) fallbackEligible = forced;
+			}
+			if (fallbackEligible.length === 0) continue;
+			eligible = fallbackEligible;
+			reasoning.push(`no eligible candidate in ${tier} tier → availability fallback to ${fallbackTier} (${fallbackEligible.map(c => c.key).join(", ")})`);
+			tier = fallbackTier;
+			tierCfg = fallbackCfg;
+			break;
+		}
+	}
+
 	// 9. Budget audit (+ synthetic monthly UVI for per-token providers with monthly limits)
 	const budget: RoutingHints["budget"] = {};
 	const limits = deps.budgets.limits();
