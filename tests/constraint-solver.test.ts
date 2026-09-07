@@ -87,6 +87,14 @@ describe("solveConstraints health / cooldown / circuit gates", () => {
 		expect(excluded[0]?.reason).toContain("circuit breaker open");
 	});
 
+	test("open-circuit exclusion tells the user when a retry becomes possible", () => {
+		const circuit = freshCircuit();
+		for (let i = 0; i < 3; i++) circuit.recordFailure("p/open", NOW - 30_000);
+		const { excluded } = solveConstraints([candidate("p", "open")], {}, { circuit, nowMs: NOW });
+		// opened 30s ago with the 60s default cooldown → 30s remain.
+		expect(excluded[0]?.reason).toContain("circuit breaker open (retry in 30s");
+	});
+
 	test("hard-UVI providers are excluded", () => {
 		const hard = candidate("google", "m");
 		const soft = candidate("openai", "m");

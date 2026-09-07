@@ -76,7 +76,11 @@ function exclusionReason(
 		return `${key}: cooling down until ${new Date(candidate.cooldownUntil).toISOString()}${cause}`;
 	}
 	if (opts.circuit.state(key, opts.nowMs) === "open") {
-		return `${key}: circuit breaker open`;
+		const retryAt = opts.circuit.retryAt(key);
+		const hint = retryAt !== undefined && retryAt > opts.nowMs
+			? ` (retry in ${Math.ceil((retryAt - opts.nowMs) / 1000)}s, or /auto-router reset)`
+			: "";
+		return `${key}: circuit breaker open${hint}`;
 	}
 	if (opts.hardUviProviders?.has(candidate.target.provider)) {
 		return `${key}: provider ${candidate.target.provider} has critical UVI (hard mode)`;

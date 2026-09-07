@@ -277,6 +277,9 @@ function createPiCommandHost(
 		persistClassifierOverrides() {
 			persistClassifierOverrides(stateRef.current);
 		},
+		persistTrackers() {
+			persistRuntimeTrackers(stateRef.current);
+		},
 	};
 }
 

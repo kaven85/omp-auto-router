@@ -1,5 +1,5 @@
 import { BudgetTracker } from "../core/budget-tracker";
-import { CircuitBreaker } from "../core/circuit-breaker";
+import { CircuitBreaker, type CircuitRecordSnapshot } from "../core/circuit-breaker";
 import { sanitizeClassifierOverrides, type ClassifierOverrides } from "../core/complexity-classifier";
 import { DecisionStore } from "../core/decision-store";
 import { EventLog } from "../core/event-log";
@@ -39,7 +39,7 @@ export function createPersistentRuntimeState(config: RouterConfig, stateDir: str
 	}
 	const circuit = new CircuitBreaker();
 	const latency = new LatencyTracker();
-	const circuitSnapshot = stateStore.readJson<Record<string, { consecutiveFailures: number; openedAt: number; cooldownMs: number }>>("circuit.json");
+	const circuitSnapshot = stateStore.readJson<Record<string, CircuitRecordSnapshot>>("circuit.json");
 	if (circuitSnapshot) circuit.restore(circuitSnapshot);
 	const latencySnapshot = stateStore.readJson<Record<string, number>>("first-output-latency.json");
 	if (latencySnapshot) latency.restore(latencySnapshot);
@@ -69,6 +69,14 @@ export function createPersistentRuntimeState(config: RouterConfig, stateDir: str
 }
 
 export function persistRuntimeTrackers(state: PersistentRuntimeState): void {
+	// Read-modify-write: multiple sessions share this state file, so a plain
+	// overwrite is last-writer-wins and lets one session resurrect failures
+	// another session already resolved. Merge keeps the newest record per key
+	// (success tombstones included). The read→write window is not locked, but
+	// writeJson is atomic, so the worst case is one lost update — never a
+	// corrupted or silently stale file.
+	const onDisk = state.stateStore.readJson<Record<string, CircuitRecordSnapshot>>("circuit.json");
+	if (onDisk) state.circuit.mergeSnapshot(onDisk, Date.now());
 	state.stateStore.writeJson("circuit.json", state.circuit.snapshot());
 	state.stateStore.writeJson("first-output-latency.json", state.latency.snapshot());
 }

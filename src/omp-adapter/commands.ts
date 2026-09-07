@@ -9,7 +9,7 @@
  */
 
 import { buildRouterCompletions, runRouterCommand, type RouterCommandHost } from "../runtime/commands";
-import { persistClassifierOverrides } from "../runtime/state";
+import { persistClassifierOverrides, persistRuntimeTrackers } from "../runtime/state";
 import { VIRTUAL_MODEL_BASE } from "../runtime/adapter-kit";
 import { fetchOmpBalance } from "./balance";
 import { agentDir } from "./config";
@@ -100,5 +100,6 @@ function createOmpCommandHost(state: AdapterState, deps: CommandDeps, ctx: OmpEx
 		fetchQuota: (providers) => createHostPorts(ctx, state).fetchQuota(providers),
 		fetchBalance: (provider, endpoint) => fetchOmpBalance(ctx, state, provider, endpoint),
 		persistClassifierOverrides: () => persistClassifierOverrides(state),
+		persistTrackers: () => persistRuntimeTrackers(state),
 	};
 }

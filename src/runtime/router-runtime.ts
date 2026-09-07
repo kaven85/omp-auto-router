@@ -74,7 +74,11 @@ export interface RouterRuntimeHost {
 		context: RouterRequestContext,
 		options: Record<string, unknown> | undefined,
 		thinking: ThinkingLevel | undefined,
+		/** Called immediately before the host starts the provider request. */
+		onStreamStart?: () => void,
 	): AsyncIterable<StreamEventLike> | Promise<AsyncIterable<StreamEventLike>>;
+	/** True when `streamTarget` calls onStreamStart after its own stream lock. */
+	deferTrialReservation?: boolean;
 	/** Host-specific retry classification may supplement generic transient errors. */
 	isRetryable?(error: unknown): boolean;
 	/** Clamp a router-selected thinking level to a target's public capabilities. */
@@ -118,6 +122,9 @@ const TEST_FAILURE_ESCALATION_MS = 10 * 60_000;
  * target streaming rather than credentials: adapters retain all auth details.
  */
 export class RouterRuntime {
+	/** One bounded availability wait per request; persistent 429s still surface. */
+	private readonly availabilityRetries = new WeakSet<RouterRequest>();
+
 	constructor(
 		private readonly state: RouterRuntimeState,
 		private readonly host: RouterRuntimeHost,
@@ -229,8 +236,14 @@ export class RouterRuntime {
 				// demotion is for adaptive tier chains, not an operator-fixed one.
 				? decision.orderedCandidates
 				: demotePoorlyRated(decision.orderedCandidates, this.state.ratings);
-		decision.orderedCandidates = order;
-		if (order[0]) decision.target = order[0];
+		// A half-open trial is reserved immediately before the host opens its
+		// provider stream (inside `factory`), not while this request may still be
+		// queued behind OMP's global thinking lock. Reserving here caused a queued
+		// request to look like an in-flight model call forever.
+		const acquiredTrials: string[] = [];
+		const admittedOrder = order;
+		decision.orderedCandidates = admittedOrder;
+		if (admittedOrder[0]) decision.target = admittedOrder[0];
 		// Per-target thinking: target override > chain-level stamp (role > tier).
 		const chainThinking = decision.chainThinking;
 		const configuredThinking = decision.target.thinking ?? chainThinking;
@@ -244,10 +257,51 @@ export class RouterRuntime {
 		else delete decision.thinking;
 
 		this.recordDecision(decision, cleanPrompt);
-		if (order.length === 0) {
+		if (admittedOrder.length === 0) {
 			const exclusions = decision.reasoning.filter((line) => line.startsWith("excluded "));
-			const detail = exclusions.length ? ` — ${exclusions.join("; ")}` : "";
-			throw new RouterRuntimeError(`no eligible candidates for profile "${decision.profile}" tier=${decision.tier}${detail}`);
+			const candidateKeys = new Set((chainTargets ?? tier?.targets ?? []).map(targetKey));
+			const retryAt = transientRetryAt(
+				candidates.filter(candidate => candidateKeys.has(candidate.key)),
+				this.state.circuit,
+				this.now(),
+			);
+			// OMP's core retry can fire before the router's provider cooldown ends.
+			// When every target is temporarily gated, wait once for the earliest
+			// retry time instead of turning that recoverable state into a terminal
+			// no-candidate error. Abort remains responsive and persistent 429s
+			// still surface after the bounded retry.
+			const retrySignal = request.options?.signal as AbortSignal | undefined;
+			// Only wait when the host supplied cancellation. A command invocation
+			// without a signal must retain the immediate, actionable error rather
+			// than creating an uninterruptible background timer.
+			if (retryAt !== undefined && retrySignal !== undefined && !this.availabilityRetries.has(request)) {
+				this.availabilityRetries.add(request);
+				try {
+					const delayMs = retryAt - this.now();
+					this.state.eventLog.append({ type: "warn", at: this.now(), what: "availability-retry-wait", profile: decision.profile, tier: decision.tier, retryAt, exclusions });
+					this.host.setStatus?.(`auto-router waiting ${Math.ceil(delayMs / 1000)}s to retry ${decision.profile}/${decision.tier}`);
+					if (await waitForRetry(delayMs, retrySignal)) {
+						yield* this.stream(request);
+					}
+					return;
+				} finally {
+					this.availabilityRetries.delete(request);
+				}
+			}
+			const primary = exclusions[0]?.replace(/^excluded\s+/, "");
+			// Log the full evidence even when the host truncates the rendered error.
+			// This is the diagnostic seam for a model that streams directly but is
+			// rejected by routing: the exact gate must be observable after the fact.
+			this.state.eventLog.append({
+				type: "error",
+				at: this.now(),
+				what: "no-eligible-candidates",
+				profile: decision.profile,
+				tier: decision.tier,
+				exclusions,
+			});
+			const detail = primary ? ` — ${primary}` : "";
+			throw new RouterRuntimeError(`no eligible candidates${detail} (profile "${decision.profile}" tier=${decision.tier})`);
 		}
 		this.host.setStatus?.(
 			`auto-router ${decision.profile}${decision.role !== DEFAULT_ROLE ? `/${decision.role}` : ""} | tier=${formatComplexityTier(decision.tier)} (${decision.confidence.toFixed(2)}) | ${decision.target.provider}/${decision.target.model}`,
@@ -261,12 +315,34 @@ export class RouterRuntime {
 		const runtime = this;
 		const factory = async function* (target: RouteTarget): AsyncGenerator<StreamEventLike> {
 			const key = targetKey(target);
+			const reserveTrial = () => {
+				if (runtime.state.circuit.state(key, runtime.now()) !== "half-open") return;
+				if (!runtime.state.circuit.tryAcquireTrial(key, runtime.now())) {
+					// OMP already serializes provider calls behind its host-global
+					// thinking lock. A revived/re-entrant request may observe the first
+					// request's lease after obtaining that lock; treating it as fatal
+					// leaves the UI Working with no provider request. For deferred OMP
+					// hosts the lease is advisory — continue in lock order.
+					if (runtime.host.deferTrialReservation) return;
+					throw new HalfOpenTrialBusyError(key);
+				}
+				acquiredTrials.push(key);
+			};
+			// Pi and test hosts start immediately, so reserve at the factory seam.
+			// OMP defers this until after its host-global thinking lock is granted.
+			if (!runtime.host.deferTrialReservation) reserveTrial();
 			targetStarts.set(key, runtime.now());
 			const configuredThinking = target.thinking ?? chainThinking;
 			const thinking = configuredThinking && runtime.host.clampThinking
 				? runtime.host.clampThinking(target, configuredThinking)
 				: configuredThinking;
-			const stream = await runtime.host.streamTarget(target, request.context, request.options, thinking);
+			const stream = await runtime.host.streamTarget(
+				target,
+				request.context,
+				request.options,
+				thinking,
+				runtime.host.deferTrialReservation ? reserveTrial : undefined,
+			);
 			for await (const event of stream) {
 				if (!firstOutputs.has(key) && isVisibleResponseEvent(event)) {
 					firstOutputs.set(key, runtime.now() - (targetStarts.get(key) ?? runtime.now()));
@@ -280,9 +356,21 @@ export class RouterRuntime {
 			isSubstantive: defaultIsSubstantive,
 			onTargetFailed: (target: RouteTarget, error: unknown) => {
 				const key = targetKey(target);
-				this.state.circuit.recordFailure(key, this.now());
-				this.state.cooldowns.set(key, { until: this.now() + (this.state.cooldownAfterFailureMs ?? DEFAULT_COOLDOWN_MS), reason: formatError(error) });
-				this.state.eventLog.append({ type: "error", at: this.now(), provider: target.provider, model: target.model, error: formatError(error) });
+				const now = this.now();
+				// A busy half-open lease is router-internal concurrency control, not a
+				// provider failure. Counting it reopens the circuit and doubles the
+				// cooldown even though no backend request was sent.
+				if (error instanceof HalfOpenTrialBusyError) {
+					this.state.eventLog.append({ type: "warn", at: now, what: "half-open-trial-busy", provider: target.provider, model: target.model });
+					return;
+				}
+				const configuredCooldownMs = this.state.cooldownAfterFailureMs ?? DEFAULT_COOLDOWN_MS;
+				// CircuitBreaker owns the effective retry deadline, including its
+				// exponential backoff and cap. The adapter-facing map is only a
+				// reason-carrying projection, so it must never calculate a second one.
+				const backoff = this.state.circuit.recordFailure(key, now, { cooldownMs: configuredCooldownMs });
+				this.state.cooldowns.set(key, { until: backoff.retryAt, reason: formatError(error) });
+				this.state.eventLog.append({ type: "error", at: now, provider: target.provider, model: target.model, error: formatError(error) });
 			},
 			onFailover: (from: RouteTarget, to: RouteTarget, error: unknown) => {
 				this.state.eventLog.append({ type: "failover", at: this.now(), from: targetKey(from), to: targetKey(to), error: formatError(error) });
@@ -294,7 +382,7 @@ export class RouterRuntime {
 			},
 			onTargetSettled: (target: RouteTarget) => {
 				const key = targetKey(target);
-				this.state.circuit.recordSuccess(key);
+				this.state.circuit.recordSuccess(key, this.now());
 				this.state.cooldowns.delete(key);
 				const firstOutput = firstOutputs.get(key);
 				if (firstOutput !== undefined) this.state.latency.record(key, firstOutput);
@@ -309,11 +397,15 @@ export class RouterRuntime {
 			},
 		};
 
-		for await (const event of failoverStream(order, factory, hooks, { signal: request.options?.signal as AbortSignal | undefined })) {
-			if (event.type === "done" && settledTarget) {
-				this.recordUsage(settledTarget, usageFromEvent(event), costs.get(targetKey(settledTarget)));
+		try {
+			for await (const event of failoverStream(admittedOrder, factory, hooks, { signal: request.options?.signal as AbortSignal | undefined })) {
+				if (event.type === "done" && settledTarget) {
+					this.recordUsage(settledTarget, usageFromEvent(event), costs.get(targetKey(settledTarget)));
+				}
+				yield event;
 			}
-			yield event;
+		} finally {
+			for (const key of acquiredTrials) this.state.circuit.releaseTrial(key);
 		}
 	}
 
@@ -349,6 +441,13 @@ export class RouterRuntime {
 
 	private now(): number {
 		return this.host.now?.() ?? Date.now();
+	}
+}
+
+class HalfOpenTrialBusyError extends Error {
+	constructor(key: string) {
+		super(`half-open trial already in progress for ${key}`);
+		this.name = "HalfOpenTrialBusyError";
 	}
 }
 
@@ -431,4 +530,35 @@ function isTextPart(value: unknown): value is { type: "text"; text: string } {
 function isVisibleResponseEvent(event: StreamEventLike): boolean {
 	if (event.type === "thinking_delta" || event.type === "text_delta" || event.type === "toolcall_delta") return typeof event.delta === "string" && event.delta.length > 0;
 	return event.type === "image_end" || event.type === "toolcall_start" || event.type === "toolcall_end" || event.type === "done";
+}
+
+/** Return a retry deadline only when every configured target is transiently gated. */
+function transientRetryAt(candidates: CandidateInfo[], circuit: CircuitBreaker, nowMs: number): number | undefined {
+	if (candidates.length === 0) return undefined;
+	const retryAts = candidates.map(candidate => {
+		if (candidate.cooldownUntil !== undefined && candidate.cooldownUntil > nowMs) return candidate.cooldownUntil;
+		if (circuit.state(candidate.key, nowMs) === "open") return circuit.retryAt(candidate.key);
+		return undefined;
+	});
+	return retryAts.every((retryAt): retryAt is number => retryAt !== undefined)
+		? Math.min(...retryAts)
+		: undefined;
+}
+
+/** Sleep until a transient availability gate expires; abort resolves cleanly. */
+function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<boolean> {
+	if (signal?.aborted) return Promise.resolve(false);
+	return new Promise(resolve => {
+		const timer = setTimeout(done, Math.max(0, delayMs));
+		function done(): void {
+			signal?.removeEventListener("abort", onAbort);
+			resolve(true);
+		}
+		function onAbort(): void {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+			resolve(false);
+		}
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
 }

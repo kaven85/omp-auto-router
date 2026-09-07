@@ -67,6 +67,8 @@ export interface RouterCommandHost {
 	fetchBalance?(provider: string, endpoint: string): Promise<ProviderBalance | undefined>;
 	/** Persist classifier keyword overrides after a rules edit. */
 	persistClassifierOverrides(): void;
+	/** Persist circuit breaker / latency trackers after a manual reset. */
+	persistTrackers?(): void;
 }
 
 /** Format milliseconds until reset into a human-readable string. */
@@ -489,6 +491,28 @@ export const SUBCOMMANDS: SubcommandDef[] = [
 				return;
 			}
 			host.notify(`shadow mode: ${state.shadowEnabled ? "🟢 enabled" : "off"}`, "info");
+		},
+	},
+	{
+		sub: "reset",
+		usage: "",
+		description: "手动清除熔断与冷却，让下一次请求立即重试（不改限流配置）",
+		example: "/auto-router reset",
+		run(_arg, state, host) {
+			const now = Date.now();
+			const keys = Object.keys(state.circuit.snapshot());
+			const cooldowns = state.cooldowns.size;
+			// Success tombstones (not reset()) so the shared state file's merge
+			// cannot resurrect failures another session wrote before this reset.
+			for (const key of keys) state.circuit.recordSuccess(key, now);
+			state.cooldowns.clear();
+			host.persistTrackers?.();
+			host.notify(
+				keys.length + cooldowns > 0
+					? `cleared ${keys.length} circuit record(s) and ${cooldowns} cooldown(s) — the next request retries immediately`
+					: "no circuit/cooldown state to clear",
+				"info",
+			);
 		},
 	},
 	{

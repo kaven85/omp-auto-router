@@ -72,6 +72,7 @@ interface FakeHost extends RouterCommandHost {
 	switches: string[];
 	profileEntries: string[];
 	persisted: number;
+	trackersPersisted: number;
 	reloadCount: number;
 	switchResult: boolean;
 }
@@ -83,6 +84,7 @@ function createHost(state: RouterRuntimeState, overrides: Partial<RouterCommandH
 		switches: [],
 		profileEntries: [],
 		persisted: 0,
+		trackersPersisted: 0,
 		reloadCount: 0,
 		switchResult: true,
 		notify(message, level) {
@@ -104,6 +106,9 @@ function createHost(state: RouterRuntimeState, overrides: Partial<RouterCommandH
 		quotaAvailable: () => true,
 		persistClassifierOverrides() {
 			host.persisted++;
+		},
+		persistTrackers() {
+			host.trackersPersisted++;
 		},
 		...overrides,
 	};
@@ -284,6 +289,24 @@ describe("shared router commands", () => {
 		expect(state.shadowEnabled).toBe(true);
 		await runRouterCommand("shadow", state, host);
 		expect(output(host)).toContain("shadow mode: 🟢 enabled");
+	});
+
+	test("reset tombstones circuit records and clears cooldowns so retries resume immediately", async () => {
+		const state = createState();
+		const host = createHost(state);
+		for (let i = 0; i < 3; i++) state.circuit.recordFailure("kimi-code/k3", 1_000 + i);
+		state.cooldowns.set("kimi-code/k3", { until: 61_000, reason: "429" });
+		await runRouterCommand("reset", state, host);
+		expect(state.circuit.state("kimi-code/k3", 1_002)).toBe("closed");
+		expect(state.cooldowns.size).toBe(0);
+		expect(host.trackersPersisted).toBe(1);
+		expect(output(host)).toContain("the next request retries immediately");
+		// Tombstones must survive the shared-file merge: an older on-disk failure
+		// from another session cannot resurrect the cleared circuit.
+		state.circuit.mergeSnapshot({
+			"kimi-code/k3": { consecutiveFailures: 3, openedAt: 1_000, cooldownMs: 60_000, updatedAt: 1_002 },
+		}, Date.now());
+		expect(state.circuit.state("kimi-code/k3", Date.now())).toBe("closed");
 	});
 
 	test("rate persists feedback against the settled target", async () => {

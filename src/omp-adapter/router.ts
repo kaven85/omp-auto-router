@@ -123,7 +123,8 @@ function createOmpRuntimeHost(state: AdapterState, pi: OmpExtensionApi, ctx: Omp
 	const ports = createHostPorts(ctx, state);
 	return {
 		candidatesFor: (targets, cooldowns) => enrichCandidates(ports, targets, cooldowns),
-		async *streamTarget(target, context, options, thinking) {
+		deferTrialReservation: true,
+		async *streamTarget(target, context, options, thinking, onStreamStart) {
 			const model = ctx.models.resolve(`${target.provider}/${target.model}`);
 			if (!model) throw new Error(`auto-router: target not resolvable: ${target.provider}/${target.model}`);
 			const apiKey = await ports.getApiKey(target);
@@ -133,6 +134,10 @@ function createOmpRuntimeHost(state: AdapterState, pi: OmpExtensionApi, ctx: Omp
 			let release: (() => void) | undefined;
 			try {
 				release = await acquireStreamLock(options?.signal as AbortSignal | undefined);
+				// The router's half-open lease must start only after this host-global
+				// lock is granted; otherwise a queued request blocks every later
+				// retry while no provider call exists yet.
+				onStreamStart?.();
 				const canOverrideThinking = thinking !== undefined && !state.shadowEnabled && typeof pi.getThinkingLevel === "function";
 				const priorThinking = canOverrideThinking ? pi.getThinkingLevel!() : undefined;
 				if (canOverrideThinking) pi.setThinkingLevel(thinking!);

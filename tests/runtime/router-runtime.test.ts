@@ -176,6 +176,235 @@ describe("RouterRuntime", () => {
 		expect(state.sessionUsage.calls.get("first/one")).toBeUndefined();
 	});
 
+	test("retries a 429 after the configured cooldown without restarting", async () => {
+		const state = createState();
+		state.circuit = new CircuitBreaker({ failureThreshold: 1 });
+		state.cooldownAfterFailureMs = 5_000;
+		let now = 1_700_000_000_000;
+		let attempts = 0;
+		const host = createHost([]);
+		host.now = () => now;
+		// Model-health enrichment is not the gate under test; the runtime's circuit
+		// must admit the same target when its configured retry window expires.
+		host.candidatesFor = (targets) => targets.map((target) => ({
+			target,
+			key: `${target.provider}/${target.model}`,
+			healthy: true,
+			capabilities: { reasoning: true, input: ["text", "image"], contextWindow: 200_000 },
+		}));
+		host.streamTarget = () => (async function* () {
+			attempts++;
+			if (attempts === 1) throw Object.assign(new Error("rate limited"), { status: 429 });
+			yield { type: "done", message: {} };
+		})();
+		const runtime = new RouterRuntime(state, host);
+
+		await expect(async () => {
+			for await (const _event of runtime.stream(request("@reasoning solve this"))) { /* drain */ }
+		}).toThrow("all 1 candidate(s) failed");
+		expect(state.circuit.state("second/two", now)).toBe("open");
+
+		now += 5_000;
+		const received: string[] = [];
+		for await (const event of runtime.stream(request("@reasoning solve this"))) received.push(event.type);
+		expect(received).toEqual(["done"]);
+		expect(attempts).toBe(2);
+	});
+
+	test("waits for a transiently cooled sole target then retries once", async () => {
+		const state = createState();
+		const retryAt = Date.now() + 15;
+		state.cooldowns.set("second/two", { until: retryAt, reason: "429" });
+		const host = createHost([{ type: "done", message: {} }]);
+		host.now = () => Date.now();
+		host.candidatesFor = (targets, cooldowns) => targets.map((target) => {
+			const cooldown = cooldowns.get(`${target.provider}/${target.model}`);
+			return {
+				target,
+				key: `${target.provider}/${target.model}`,
+				healthy: true,
+				capabilities: { reasoning: true, input: ["text", "image"], contextWindow: 200_000 },
+				...(cooldown && cooldown.until > Date.now() ? { cooldownUntil: cooldown.until, cooldownReason: cooldown.reason } : {}),
+			};
+		});
+		const statuses: string[] = [];
+		host.setStatus = (text) => statuses.push(text);
+		const runtime = new RouterRuntime(state, host);
+		const controller = new AbortController();
+		const input = request("@reasoning solve this");
+		input.options = { signal: controller.signal };
+
+		const events: string[] = [];
+		for await (const event of runtime.stream(input)) events.push(event.type);
+		expect(events).toEqual(["done"]);
+		expect(statuses.some(status => status.includes("waiting"))).toBe(true);
+	});
+
+	test("keeps the cooldown projection aligned after a failed half-open retry", async () => {
+		const state = createState();
+		state.circuit = new CircuitBreaker({ failureThreshold: 1 });
+		state.cooldownAfterFailureMs = 5_000;
+		let now = 1_700_000_000_000;
+		let attempts = 0;
+		const host = createHost([]);
+		host.now = () => now;
+		host.candidatesFor = (targets) => targets.map((target) => ({ target, key: `${target.provider}/${target.model}`, healthy: true }));
+		host.streamTarget = () => (async function* () {
+			attempts++;
+			if (attempts < 3) throw Object.assign(new Error("rate limited"), { status: 429 });
+			yield { type: "done", message: {} };
+		})();
+		const runtime = new RouterRuntime(state, host);
+		const drain = async () => {
+			for await (const _event of runtime.stream(request("@reasoning solve this"))) { /* drain */ }
+		};
+
+		await expect(drain).toThrow("all 1 candidate(s) failed");
+		now += 5_000;
+		await expect(drain).toThrow("all 1 candidate(s) failed");
+		// The half-open failure doubled the effective retry window to 10 seconds.
+		expect(state.cooldowns.get("second/two")?.until).toBe(now + 10_000);
+		now += 10_000;
+		await drain();
+		expect(attempts).toBe(3);
+	});
+
+	test("uses the circuit's capped cooldown for the runtime projection", async () => {
+		const state = createState();
+		state.circuit = new CircuitBreaker({ failureThreshold: 1 });
+		state.cooldownAfterFailureMs = 60 * 60_000;
+		const now = 1_700_000_000_000;
+		const host = createHost([]);
+		host.now = () => now;
+		host.candidatesFor = (targets) => targets.map((target) => ({ target, key: `${target.provider}/${target.model}`, healthy: true }));
+		host.streamTarget = () => (async function* () {
+			throw Object.assign(new Error("rate limited"), { status: 429 });
+		})();
+		const runtime = new RouterRuntime(state, host);
+
+		await expect(async () => {
+			for await (const _event of runtime.stream(request("@reasoning solve this"))) { /* drain */ }
+		}).toThrow("all 1 candidate(s) failed");
+		expect(state.cooldowns.get("second/two")?.until).toBe(now + 30 * 60_000);
+	});
+
+	test("admits only one concurrent half-open retry", async () => {
+		const state = createState();
+		state.circuit = new CircuitBreaker({ failureThreshold: 1 });
+		const now = 1_700_000_000_000;
+		state.circuit.recordFailure("second/two", now - 60_000);
+		let calls = 0;
+		let started!: () => void;
+		let release!: () => void;
+		const firstStarted = new Promise<void>((resolve) => { started = resolve; });
+		const firstRelease = new Promise<void>((resolve) => { release = resolve; });
+		const host = createHost([]);
+		host.now = () => now;
+		host.candidatesFor = (targets) => targets.map((target) => ({ target, key: `${target.provider}/${target.model}`, healthy: true }));
+		host.streamTarget = () => (async function* () {
+			calls++;
+			if (calls === 1) {
+				started();
+				await firstRelease;
+			}
+			yield { type: "done", message: {} };
+		})();
+		const runtime = new RouterRuntime(state, host);
+		const first = runtime.stream(request("@reasoning solve this"));
+		const firstNext = first.next();
+		await firstStarted;
+
+		const second = runtime.stream(request("@reasoning solve this"));
+		await expect(second.next()).rejects.toThrow("half-open trial already in progress");
+		expect(calls).toBe(1);
+		// Router-internal lease contention must not count as another provider
+		// failure or double the circuit cooldown when no request was sent.
+		expect(state.circuit.snapshot()["second/two"]?.consecutiveFailures).toBe(1);
+		release();
+		expect((await firstNext).value.type).toBe("done");
+	});
+
+	test("defers the half-open lease until an OMP-style host starts its stream", async () => {
+		const state = createState();
+		state.circuit = new CircuitBreaker({ failureThreshold: 1 });
+		const now = 1_700_000_000_000;
+		state.circuit.recordFailure("second/two", now - 60_000);
+		let calls = 0;
+		let firstStarted!: () => void;
+		let releaseFirst!: () => void;
+		let releaseSecond!: () => void;
+		let secondEntered!: () => void;
+		const started = new Promise<void>(resolve => { firstStarted = resolve; });
+		const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+		const secondGate = new Promise<void>(resolve => { releaseSecond = resolve; });
+		const secondStarted = new Promise<void>(resolve => { secondEntered = resolve; });
+		const host = createHost([]);
+		host.now = () => now;
+		host.deferTrialReservation = true;
+		host.candidatesFor = (targets) => targets.map((target) => ({ target, key: `${target.provider}/${target.model}`, healthy: true }));
+		host.streamTarget = (_target, _context, _options, _thinking, onStreamStart) => (async function* () {
+			calls++;
+			if (calls === 1) {
+				onStreamStart?.();
+				firstStarted();
+				await firstGate;
+			} else {
+				// Simulates OMP waiting for its thinking lock before it can start.
+				secondEntered();
+				await secondGate;
+				onStreamStart?.();
+			}
+			yield { type: "done", message: {} };
+		})();
+		const runtime = new RouterRuntime(state, host);
+		const first = runtime.stream(request("@reasoning solve this"));
+		const firstNext = first.next();
+		await started;
+		const second = runtime.stream(request("@reasoning solve this"));
+		const secondNext = second.next();
+		await secondStarted;
+		expect(calls).toBe(2);
+
+		releaseFirst();
+		expect((await firstNext).value.type).toBe("done");
+		releaseSecond();
+		expect((await secondNext).value.type).toBe("done");
+	});
+
+	test("OMP re-entry treats a busy half-open lease as advisory after host serialization", async () => {
+		const state = createState();
+		state.circuit = new CircuitBreaker({ failureThreshold: 1 });
+		const now = 1_700_000_000_000;
+		state.circuit.recordFailure("second/two", now - 60_000);
+		let calls = 0;
+		let firstStarted!: () => void;
+		let releaseFirst!: () => void;
+		const started = new Promise<void>(resolve => { firstStarted = resolve; });
+		const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+		const host = createHost([]);
+		host.now = () => now;
+		host.deferTrialReservation = true;
+		host.candidatesFor = (targets) => targets.map((target) => ({ target, key: `${target.provider}/${target.model}`, healthy: true }));
+		host.streamTarget = (_target, _context, _options, _thinking, onStreamStart) => (async function* () {
+			calls++;
+			onStreamStart?.();
+			if (calls === 1) {
+				firstStarted();
+				await firstGate;
+			}
+			yield { type: "done", message: {} };
+		})();
+		const runtime = new RouterRuntime(state, host);
+		const first = runtime.stream(request("@reasoning solve this"));
+		const firstNext = first.next();
+		await started;
+
+		const second = runtime.stream(request("@reasoning solve this"));
+		expect((await second.next()).value.type).toBe("done");
+		expect(calls).toBe(2);
+		releaseFirst();
+		expect((await firstNext).value.type).toBe("done");
+	});
 
 	test("mixed-phase prompts are adjudicated through the host hook, fail open", async () => {
 		const state = createState();
