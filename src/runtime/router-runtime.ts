@@ -40,6 +40,10 @@ export interface RouterRuntimeState {
 		calls: Map<string, number>;
 		cost: Map<string, number>;
 		thinking: Map<string, Set<string>>;
+		/** Prompt tokens processed per target, split fresh / cache-hit / cache-write. */
+		inputTokens: Map<string, number>;
+		cacheRead: Map<string, number>;
+		cacheWrite: Map<string, number>;
 	};
 	lastDecision?: { at: number; decision: RoutingDecision; cleanPrompt: string };
 	uviEnabled?: boolean;
@@ -435,6 +439,9 @@ export class RouterRuntime {
 		if (!this.state.shadowEnabled) {
 			const key = targetKey(target);
 			this.state.sessionUsage.cost.set(key, (this.state.sessionUsage.cost.get(key) ?? 0) + estimatedCost);
+			this.state.sessionUsage.inputTokens.set(key, (this.state.sessionUsage.inputTokens.get(key) ?? 0) + inputTokens);
+			this.state.sessionUsage.cacheRead.set(key, (this.state.sessionUsage.cacheRead.get(key) ?? 0) + cacheRead);
+			this.state.sessionUsage.cacheWrite.set(key, (this.state.sessionUsage.cacheWrite.get(key) ?? 0) + cacheWrite);
 		}
 		this.state.eventLog.append({ type: "settled", at: this.now(), provider: target.provider, model: target.model, inputTokens, outputTokens, estimatedCost });
 	}

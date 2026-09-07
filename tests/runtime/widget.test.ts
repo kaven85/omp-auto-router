@@ -33,7 +33,7 @@ function createState(withProfileBudgets = true): RouterRuntimeState {
 		eventLog: new EventLog("/dev/null"),
 		cooldowns: new Map(),
 		ratings: new FeedbackTracker({ load: () => undefined, save: () => {} }),
-		sessionUsage: { calls: new Map(), cost: new Map(), thinking: new Map() },
+		sessionUsage: { calls: new Map(), cost: new Map(), thinking: new Map(), inputTokens: new Map(), cacheRead: new Map(), cacheWrite: new Map() },
 		quotaCache: { at: 0, data: [] },
 		balanceCache: {},
 		uviEnabled: true,
@@ -95,6 +95,33 @@ describe("shared widget", () => {
 		const lines = buildWidgetLines(state, decisionFixture());
 		expect(lines.some((line) => line === "balance: deepseek 3.21 USD")).toBe(true);
 		expect(lines.some((line) => line.startsWith("uvi:"))).toBe(false);
+	});
+
+	test("renders the prompt-cache hit rate after the uvi line", () => {
+		const state = createState();
+		state.quotaCache = {
+			at: Date.now(),
+			data: [{ provider: "deepseek", fetchedAt: Date.now(), windows: [{ id: "weekly", usedFraction: 0.4 }] }],
+		};
+		state.sessionUsage.inputTokens.set("deepseek/flash", 3_000);
+		state.sessionUsage.cacheRead.set("deepseek/flash", 6_000);
+		state.sessionUsage.cacheWrite.set("deepseek/flash", 1_000);
+		const lines = buildWidgetLines(state, decisionFixture());
+		expect(lines.indexOf("cache: deepseek hit 60.00% · read 6,000 · write 1,000")).toBe(lines.indexOf("uvi: deepseek 60% left") + 1);
+	});
+
+	test("aggregates cache stats across the provider's models and omits the line before any settled request", () => {
+		const state = createState();
+		state.sessionUsage.inputTokens.set("deepseek/flash", 1_000);
+		state.sessionUsage.cacheRead.set("deepseek/flash", 1_000);
+		state.sessionUsage.inputTokens.set("deepseek/other", 1_000);
+		state.sessionUsage.cacheRead.set("deepseek/other", 3_000);
+		state.sessionUsage.inputTokens.set("anthropic/claude", 9_000);
+		const lines = buildWidgetLines(state, decisionFixture());
+		expect(lines.some((line) => line === "cache: deepseek hit 66.67% · read 4,000 · write 0")).toBe(true);
+
+		const fresh = createState();
+		expect(buildWidgetLines(fresh, decisionFixture()).some((line) => line.startsWith("cache:"))).toBe(false);
 	});
 
 	test("suppresses identical re-renders per runtime instance only", () => {

@@ -61,7 +61,7 @@ function createState(config: RouterConfig = CONFIG): RouterRuntimeState {
 		eventLog: new EventLog("/dev/null"),
 		cooldowns: new Map(),
 		ratings: new FeedbackTracker({ load: () => undefined, save: () => {} }),
-		sessionUsage: { calls: new Map(), cost: new Map(), thinking: new Map() },
+		sessionUsage: { calls: new Map(), cost: new Map(), thinking: new Map(), inputTokens: new Map(), cacheRead: new Map(), cacheWrite: new Map() },
 		classifierOverrides: {},
 		configErrors: [],
 	};

@@ -59,7 +59,7 @@ export function createPersistentRuntimeState(config: RouterConfig, stateDir: str
 			save: (value) => stateStore.writeJson("ratings.json", value),
 		}),
 		classifierOverrides: sanitizeClassifierOverrides(stateStore.readJson("classifier-rules.json")),
-		sessionUsage: { calls: new Map(), cost: new Map(), thinking: new Map() },
+		sessionUsage: { calls: new Map(), cost: new Map(), thinking: new Map(), inputTokens: new Map(), cacheRead: new Map(), cacheWrite: new Map() },
 		uviEnabled: true,
 		shadowEnabled: false,
 		cooldownAfterFailureMs: cooldownAfterFailureMs(),

@@ -63,6 +63,25 @@ export function buildWidgetLines(state: RouterRuntimeState, decision?: RoutingDe
 		const balance = state.balanceCache?.[currentProvider];
 		if (balance !== undefined) lines.push(`balance: ${currentProvider} ${balance.total} ${balance.currency}`);
 	}
+	// Prompt-cache hit rate for the current provider, aggregated over its
+	// models: cacheRead / all prompt tokens processed (fresh + hit + write).
+	// `input` is fresh-only prompt tokens on Anthropic-style hosts (pi-ai).
+	if (currentProvider !== undefined) {
+		let fresh = 0;
+		let read = 0;
+		let written = 0;
+		for (const [key, value] of state.sessionUsage.inputTokens) {
+			if (!key.startsWith(`${currentProvider}/`)) continue;
+			fresh += value;
+			read += state.sessionUsage.cacheRead.get(key) ?? 0;
+			written += state.sessionUsage.cacheWrite.get(key) ?? 0;
+		}
+		const total = fresh + read + written;
+		if (total > 0) {
+			const hit = ((read / total) * 100).toFixed(2);
+			lines.push(`cache: ${currentProvider} hit ${hit}% · read ${read.toLocaleString()} · write ${written.toLocaleString()}`);
+		}
+	}
 	return lines;
 }
 
