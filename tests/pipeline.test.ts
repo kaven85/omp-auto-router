@@ -486,21 +486,19 @@ describe("pipeline", () => {
 		expect(result.decision.orderedCandidates[0]).toEqual({ provider: "deepseek", model: "flash", billing: "per-token" });
 	});
 
-	test("sticky escalation keeps prior higher tier", () => {
+	test("current task complexity is classified independently", () => {
 		const deps = makeDeps();
 		const result = route(
 			{
 				rawPrompt: "fix the typo",
 				hasImages: false,
-				priorTier: "complex",
 				candidates: targetCandidates(allTargets(CONFIG)),
 				quota: {},
 				now: NOW,
 			},
 			deps,
 		);
-		expect(result.decision.tier).toBe("complex");
-		expect(result.decision.hints.complexity.signals.stickyEscalation).toBe(true);
+		expect(result.decision.tier).toBe("trivial");
 	});
 
 	test("force-tier rule overrides the classifier", () => {

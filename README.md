@@ -23,7 +23,7 @@
 - **跨重启记忆**：熔断器状态与首个可见输出延迟滚动均值持久化（`circuit.json` / `first-output-latency.json`），重启后 warm-start
 - **环境开关**（中性命名；旧 `OMP_AUTO_ROUTER_*` / `PI_AUTO_ROUTER_*` 写法仍作为别名生效）：`AUTO_ROUTER_UVI_HARD=1`（stressed UVI 直接排除）、`AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>`（分类置信度阈值，默认 0.45）、`AUTO_ROUTER_QUOTA_REFRESH_MS=<ms>`（配额刷新节奏，默认 30000，下限 10000）、`AUTO_ROUTER_COOLDOWN_MS=<ms>`（失败后目标冷却时长，默认 60000，下限 5000）、`AUTO_ROUTER_LLM_ADJUDICATE=0|false`（关闭混合阶段提示词的 LLM 仲裁，默认开启）
 - **后台配额刷新**：session 启动后每 30s 后台刷新 UVI 配额（host managed timer），请求路径不再因缓存过期而阻塞
-- **仪表盘 widget**：决策后渲染 profile/目标/首个可见输出延迟/预算/熔断/UVI/缓存率概览（`cache: <provider> hit N.NN% · read X · write Y`，命中率 = cacheRead / 全部 prompt token，按 provider 聚合）；后台刷新落地后立即重渲染，已过 resetsAt 的配额窗口按已重置显示，内容无变化时不重复渲染（host 无 setWidget 时自动降级）
+- **仪表盘 widget**：决策后渲染 profile/目标/首个可见输出延迟/预算/熔断/UVI/缓存率概览（`cache: <provider> hit N.NN% · read X`，有缓存写入时追加 `· write Y`，命中率 = cacheRead / 全部 prompt token，按 provider 聚合）；后台刷新落地后立即重渲染，已过 resetsAt 的配额窗口按已重置显示，内容无变化时不重复渲染（host 无 setWidget 时自动降级）
 - **Provider registry**：provider 专属知识（Kimi 窗口标签、DeepSeek 余额端点、模型 thinking 强度范围）集中在 `provider-registry.ts`；target 级 `balanceEndpoint` / `thinkingCap` 可覆盖默认
 - **日志轮转**：事件日志超过 ~2MB 自动截断保留最新一半；预算 daily 桶保留 62 天（monthly 无限期）
 - **分析脚本**：`bun scripts/routing-stats.ts [--host omp|pi] [path]` 聚合事件日志（profile/tier/target 分布、failover、top 错误）；`--host pi` 读取 Pi 状态目录
@@ -414,7 +414,7 @@ modelRoles:
 规则：
 
 - **固定链**（`targets`）：该角色所有请求直接走这条 failover 链，不做复杂度分类、不做 LLM 仲裁；`thinking` 可覆盖。
-- **软钳制**（`tierFloor` / `tierCap`）：照常分类，结果钳到界内（分类器、粘性升级、测试失败升级照常参与）。
+- **软钳制**（`tierFloor` / `tierCap`）：照常按当前请求分类，结果钳到界内（测试失败升级照常参与）。
 - **钉层逃逸**：`@fast` / `@swe` / `@reasoning` 永远优先——即使在固定链角色上，钉层也会跳出该链进入分类后的层级链。
 - 未声明的角色 → 按 `default` 处理；`roles.default` 可给主会话加钳制（如 `tierFloor: simple` 防止主会话落到 trivial）。
 - LLM 仲裁只发生在 `default` 角色上——task/smol 等角色省掉这次额外调用。
@@ -428,7 +428,7 @@ modelRoles:
 | `trivial` | 短问答（按提示词判定，与上下文长度无关）、无代码 | thinking low |
 | `simple` | 单文件改动、解释、grep 类 | thinking low |
 | `standard` | 代码块、多文件路径、diff、实现类措辞、长/超长上下文 | thinking medium |
-| `complex` | 重构/迁移/架构关键词、同任务多轮 | thinking high |
+| `complex` | 重构/迁移/架构关键词、多步任务 | thinking high |
 
 > **拆分分析**：提示词按阶段连词（`并/然后/接着/随后/再`、`and/then`）和句末标点拆成阶段序列，**首阶段定层**——后续阶段轮到各自请求时再分类、层级随阶段流转。"帮我设计并实现一个登录功能" 首阶段是设计 → complex（实现那轮再落 standard，即 complex→standard）；"实现支付逻辑，然后设计对账方案" 首阶段是实现 → standard（设计那轮升 complex，即 standard→complex）；"按设计方案实现支付逻辑" 单阶段内含实现措辞（方案是既有产物）→ standard。硬性范围词（`重构/迁移/架构/跨文件`、`refactor/migrate/rewrite`）只在首阶段内计数。
 >
@@ -445,7 +445,7 @@ modelRoles:
 @profile:economy 临时切换 profile（单次请求）
 ```
 
-低置信（< 0.45）落到 `defaultTier`；同任务多轮粘性升级、不降级——但干净的实现阶段（有实现措辞、无多步/排错信号）允许 complex→standard 降级，让层级随设计→实现的阶段流转。
+低置信（< 0.45）落到 `defaultTier`；每个请求都依据当前任务复杂度自动升降，上一轮的复杂度不会锁住后续请求。测试失败升级仍可临时抬高下一请求的层级下限。
 
 ### 各分级触发条件与触发词参考
 

@@ -137,7 +137,7 @@ function decisionFixture(profile = "premium"): RoutingDecision {
 				tier: "standard",
 				confidence: 0.9,
 				reasons: [],
-				signals: { estimatedTokens: 42, codeSignals: [], repairDebug: false, implementation: false, mixedPhase: false, multiStep: false, mechanicalOp: false, shortQa: false, stickyEscalation: false, hasImages: false },
+				signals: { estimatedTokens: 42, codeSignals: [], repairDebug: false, implementation: false, mixedPhase: false, multiStep: false, mechanicalOp: false, shortQa: false, hasImages: false },
 			},
 		},
 		decidedAt: Date.now(),

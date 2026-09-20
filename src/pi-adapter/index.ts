@@ -84,7 +84,7 @@ export default function piAutoRouterExtension(pi: ExtensionAPI): void {
 	pi.on("session_tree", (_event, ctx) => {
 		context = ctx;
 		// Tree navigation swaps the active branch: stale decisions from the
-		// previous branch must not survive into explain/sticky.
+		// previous branch must not survive into explain or LLM adjudication.
 		stateRef.current.lastDecision = undefined;
 		restoreDecisions(stateRef.current, ctx);
 	});

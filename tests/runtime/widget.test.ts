@@ -59,7 +59,7 @@ function decisionFixture(): RoutingDecision {
 				tier: "standard",
 				confidence: 0.9,
 				reasons: [],
-				signals: { estimatedTokens: 42, codeSignals: [], repairDebug: false, implementation: false, mixedPhase: false, multiStep: false, mechanicalOp: false, shortQa: false, stickyEscalation: false, hasImages: false },
+				signals: { estimatedTokens: 42, codeSignals: [], repairDebug: false, implementation: false, mixedPhase: false, multiStep: false, mechanicalOp: false, shortQa: false, hasImages: false },
 			},
 		},
 		decidedAt: Date.now(),
@@ -118,7 +118,7 @@ describe("shared widget", () => {
 		state.sessionUsage.cacheRead.set("deepseek/other", 3_000);
 		state.sessionUsage.inputTokens.set("anthropic/claude", 9_000);
 		const lines = buildWidgetLines(state, decisionFixture());
-		expect(lines.some((line) => line === "cache: deepseek hit 66.67% · read 4,000 · write 0")).toBe(true);
+		expect(lines.some((line) => line === "cache: deepseek hit 66.67% · read 4,000")).toBe(true);
 
 		const fresh = createState();
 		expect(buildWidgetLines(fresh, decisionFixture()).some((line) => line.startsWith("cache:"))).toBe(false);

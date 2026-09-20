@@ -1,9 +1,8 @@
 /**
  * Complexity classifier: combines weighted heuristic signals (context size,
- * code signals, multi-step phrasing, short Q&A, images) into a base
- * complexity tier, then applies sticky escalation (never downgrade within a
- * session) and explicit shortcut pins (`@fast`/`@swe`/`@reasoning`), which
- * take precedence over everything else.
+ * code signals, multi-step phrasing, short Q&A, images) into the current
+ * request's complexity tier, then applies explicit shortcut pins
+ * (`@fast`/`@swe`/`@reasoning`), which take precedence over the signals.
  */
 
 import { classifyContextSize, estimateTokens } from "./context-analyzer";
@@ -24,8 +23,6 @@ export interface ClassifyComplexityInput {
 	estimatedTokens: number;
 	/** The request carries image input. */
 	hasImages: boolean;
-	/** Tier of the previous decision in this session, for sticky escalation. */
-	priorTier?: ComplexityTier;
 	/** Intent classification of the prompt, when available. */
 	intent?: IntentResult;
 	/** Parsed shortcut, when the prompt carried one. */
@@ -283,7 +280,7 @@ export const MECHANICAL_OP_KEYWORDS: readonly string[] = [
 // User-editable rule overrides (`/auto-router rules add/remove`, persisted as
 // classifier-rules.json). The five keyword lists above are the editable
 // surface; structural signals (context size, code signals, intent, short Q&A,
-// images, sticky escalation, shortcut pins) are fixed and not editable.
+// images, shortcut pins) are fixed and not editable.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const CLASSIFIER_LIST_NAMES = [
@@ -430,16 +427,14 @@ interface WeightedSignal {
 }
 
 /**
- * Classify prompt complexity into a tier with a confidence score.
+ * Classify the current prompt's complexity into a tier with a confidence score.
  *
- * Precedence: explicit shortcut pin > sticky escalation > weighted base
- * signals. Confidence reflects signal agreement (0.3 floor when signals
- * conflict, up to 0.95 when they all agree); an explicit shortcut pin is
- * certain (1.0). Sticky escalation floors confidence at 0.8 so the caller's
- * low-confidence fallback cannot silently downgrade a session.
+ * Explicit shortcut pins take precedence over weighted base signals.
+ * Confidence reflects signal agreement (0.3 floor when signals conflict, up to
+ * 0.95 when they all agree); an explicit shortcut pin is certain (1.0).
  */
 export function classifyComplexity(input: ClassifyComplexityInput): ComplexityResult {
-	const { prompt, estimatedTokens, hasImages, priorTier, intent, shortcut } = input;
+	const { prompt, estimatedTokens, hasImages, intent, shortcut } = input;
 
 	const lists = resolveClassifierLists(input.overrides);
 	const codeSignals = detectCodeSignals(prompt);
@@ -639,7 +634,6 @@ export function classifyComplexity(input: ClassifyComplexityInput): ComplexityRe
 
 	const reasons = weighted.map((signal) => signal.reason);
 	let confidence = Math.min(0.95, 0.3 + (0.65 * totals[tier]) / totalWeight);
-	let stickyEscalation = false;
 
 	// ── explicit shortcut pin (highest priority) ────────────────────────────
 	const pin = shortcut?.token === undefined ? undefined : SHORTCUT_TIER_PINS[shortcut.token];
@@ -647,27 +641,6 @@ export function classifyComplexity(input: ClassifyComplexityInput): ComplexityRe
 		tier = pin;
 		confidence = 1;
 		reasons.push(`shortcut ${shortcut?.token ?? ""} pins tier ${pin}`);
-	} else if (
-		priorTier !== undefined &&
-		TIER_ORDER.indexOf(priorTier) > TIER_ORDER.indexOf(tier) &&
-		// Phase transition beats stickiness: a clean build request
-		// (implementation phrasing, no multi-step/repair signals) after a
-		// planning turn is a NEW phase, not the same task continuing — the
-		// tier must flow complex → standard with the work. Ongoing
-		// refactor/debug sessions keep their multi-step/repair signals, so
-		// they stay sticky.
-		!(implementation && !multiStep && !repairDebug)
-	) {
-		// ── sticky escalation: never downgrade within a session ──────────────
-		tier = priorTier;
-		stickyEscalation = true;
-		confidence = Math.max(confidence, 0.8);
-		reasons.push(`sticky escalation: keeping prior tier ${priorTier} (no downgrade)`);
-	} else if (
-		priorTier !== undefined &&
-		TIER_ORDER.indexOf(priorTier) > TIER_ORDER.indexOf(tier)
-	) {
-		reasons.push(`phase transition: ${priorTier} → ${tier} (new build phase, sticky escalation skipped)`);
 	}
 
 	const signals: ComplexitySignals = {
@@ -679,7 +652,6 @@ export function classifyComplexity(input: ClassifyComplexityInput): ComplexityRe
 		multiStep,
 		mechanicalOp,
 		shortQa,
-		stickyEscalation,
 		hasImages,
 	};
 	return { tier, confidence, signals, reasons };

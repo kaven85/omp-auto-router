@@ -738,8 +738,7 @@ export function formatClassifierRules(overrides: ClassifierOverrides | undefined
 		"  context 大小: <4k→问答 · 4k–32k→轻任务 · 32k–100k→常规开发 · ≥100k→深度工程",
 		"  code signals（文件路径/diff/stack-trace）→常规开发 · code/analysis intent→常规开发",
 		"  拆分分析：按 并/然后/接着/再/and/then/句末标点 拆阶段，首阶段定层——设计并实现 X→深度工程（先设计），实现 X 然后设计 Y→常规开发（先实现）；硬词（重构/迁移/架构/跨文件、refactor/migrate）只在首阶段内计数",
-		"  short Q&A（general intent, <200 tokens）→问答 · 图片输入→至少轻任务",
-		"  sticky escalation: 会话内只升不降 · 钉层: @fast→轻任务 @swe→常规开发 @reasoning→深度工程",
+		"  任务复杂度按当前请求自动升降；钉层: @fast→轻任务 @swe→常规开发 @reasoning→深度工程",
 	);
 	if (overrides && !overridesEmpty(overrides)) {
 		const count = (m?: Partial<Record<ClassifierListName, string[]>>) =>

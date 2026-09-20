@@ -48,8 +48,8 @@ export interface PipelineInput {
 	 */
 	role?: string;
 	hasImages: boolean;
-	/** Tier of the previous decision this session, if any. */
-	priorTier?: ComplexityTier;
+	/** Operational minimum tier, e.g. a recent failing test/build. */
+	tierFloor?: ComplexityTier;
 	/** Active-profile tier targets, pre-enriched by the adapter. */
 	candidates: CandidateInfo[];
 	/** provider → quota snapshot (adapter: AuthStorage.fetchUsageReports). */
@@ -116,7 +116,6 @@ export function route(input: PipelineInput, deps: PipelineDeps): PipelineResult 
 		hasImages: input.hasImages,
 		intent,
 		shortcut,
-		...(input.priorTier !== undefined ? { priorTier: input.priorTier } : {}),
 		...(deps.classifierOverrides !== undefined ? { overrides: deps.classifierOverrides } : {}),
 	});
 	reasoning.push(...complexity.reasons);
@@ -187,6 +186,11 @@ export function route(input: PipelineInput, deps: PipelineDeps): PipelineResult 
 	} else {
 		tier = effectiveProfile.defaultTier ?? "standard";
 		tierSource = `defaultTier (confidence ${complexity.confidence.toFixed(2)} < ${threshold})`;
+	}
+	if (!fixedChain && !isPinShortcut && input.tierFloor !== undefined && TIER_RANK[tier] < TIER_RANK[input.tierFloor]) {
+		reasoning.push(`tierFloor: ${tier} → ${input.tierFloor}`);
+		tier = input.tierFloor;
+		tierSource += ` + tierFloor`;
 	}
 	// Role clamps bound every source except an explicit shortcut pin.
 	if (!fixedChain && !isPinShortcut && roleCfg !== undefined) {

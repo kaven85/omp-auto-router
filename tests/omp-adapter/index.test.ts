@@ -163,7 +163,7 @@ describe("extension entry (boot + ctx adoption)", () => {
 		);
 	});
 
-	test("decisions persisted in the session branch are restored and drive sticky escalation", async () => {
+	test("restored session history does not override current task complexity", async () => {
 		await withAgentDir(BASE_CONFIG, async () => {
 			const api = new MockExtensionApi();
 			api.models = MODELS;
@@ -185,12 +185,12 @@ describe("extension entry (boot + ctx adoption)", () => {
 				{},
 			);
 			for await (const _event of stream as AsyncGenerator<unknown>) { /* drain */ }
-			// Trivial prompt, but sticky escalation from the restored complex tier
-			// routes to the complex-tier target.
-			expect(streamCalls).toEqual([{ provider: "anthropic", model: "sonnet" }]);
-			const decision = api.entries.find(
-				(e) => e.customType === "com.auto-router.v1.decision" && (e.data as { tier?: string })?.tier === "complex" && (e.data as { confidence?: number })?.confidence !== 0.9,
-			);
+			// The current trivial prompt selects the trivial-tier target.
+			expect(streamCalls).toEqual([{ provider: "deepseek", model: "flash" }]);
+			const decision = api.entries.find((e) => {
+				if (e.customType !== "com.auto-router.v1.decision" || typeof e.data !== "object" || e.data === null) return false;
+				return "tier" in e.data && e.data.tier === "trivial";
+			});
 			expect(decision).toBeDefined();
 		});
 	});

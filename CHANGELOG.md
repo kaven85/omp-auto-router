@@ -4,7 +4,11 @@
 
 ### Added
 
-- **仪表盘 widget 新增缓存率行**：UVI 行后渲染 `cache: <provider> hit N.NN% · read X · write Y`，按当前 provider 聚合其所有模型的会话内 prompt token（fresh / cacheRead / cacheWrite）。命中率 = cacheRead / (input + cacheRead + cacheWrite)，与 pi-ai 的 Anthropic 风格 usage 语义一致（`input` 不含缓存 token）。数据来自 `recordUsage` 新累计的 `sessionUsage.inputTokens/cacheRead/cacheWrite`，shadow 模式下不计入。
+- **仪表盘 widget 新增缓存率行**：UVI 行后渲染 `cache: <provider> hit N.NN% · read X`，有缓存写入时追加 `· write Y`，按当前 provider 聚合其所有模型的会话内 prompt token（fresh / cacheRead / cacheWrite）。命中率 = cacheRead / (input + cacheRead + cacheWrite)，与 pi-ai 的 Anthropic 风格 usage 语义一致（`input` 不含缓存 token）。数据来自 `recordUsage` 新累计的 `sessionUsage.inputTokens/cacheRead/cacheWrite`，shadow 模式下不计入。
+
+### Fixed
+
+- **复杂度分级不再被上一轮锁定**：每个请求按其当前任务复杂度独立定层；测试/构建失败仍会临时抬高下一请求的最低层级。
 
 ## [0.7.1] - 2026-08-25
 

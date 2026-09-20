@@ -313,8 +313,6 @@ export interface ComplexitySignals {
 	/** Mechanical operation (commit/push/deploy/…) needing execution, not design. */
 	mechanicalOp: boolean;
 	shortQa: boolean;
-	/** Sticky escalation from prior turns of the same task. */
-	stickyEscalation: boolean;
 	hasImages: boolean;
 }
 

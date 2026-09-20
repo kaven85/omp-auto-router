@@ -32,7 +32,6 @@ describe("classifyComplexity — base tiers", () => {
 		expect(result.signals.shortQa).toBe(true);
 		expect(result.signals.estimatedTokens).toBe(10);
 		expect(result.signals.codeSignals).toEqual([]);
-		expect(result.signals.stickyEscalation).toBe(false);
 	});
 
 	test("short general Q&A stays trivial even at medium context", () => {
@@ -438,12 +437,11 @@ describe("classifyComplexity — shortcut override", () => {
 		expect(result.confidence).toBe(1);
 	});
 
-	test("shortcut pin beats sticky escalation and clears its signal", () => {
+	test("shortcut pin remains authoritative", () => {
 		const result = classifyComplexity(
-			input({ priorTier: "complex", shortcut: shortcut("@fast") }),
+			input({ shortcut: shortcut("@fast") }),
 		);
 		expect(result.tier).toBe("simple");
-		expect(result.signals.stickyEscalation).toBe(false);
 	});
 
 	test("@vision and @long do not pin a tier", () => {
@@ -456,49 +454,31 @@ describe("classifyComplexity — shortcut override", () => {
 	});
 });
 
-describe("classifyComplexity — sticky escalation", () => {
-	test("higher priorTier is kept, never downgraded", () => {
-		const result = classifyComplexity(input({ priorTier: "complex", intent: GENERAL_INTENT }));
-		expect(result.tier).toBe("complex");
-		expect(result.signals.stickyEscalation).toBe(true);
-		expect(result.reasons.join(" ")).toContain("sticky escalation");
-		expect(result.confidence).toBeGreaterThanOrEqual(0.8);
+describe("classifyComplexity — per-request adjustment", () => {
+	test("lower current complexity selects trivial", () => {
+		const result = classifyComplexity(input({ intent: GENERAL_INTENT }));
+		expect(result.tier).toBe("trivial");
 	});
 
-	test("lower priorTier does not hold the computed tier back", () => {
+	test("higher current complexity selects complex", () => {
 		const result = classifyComplexity(
-			input({ priorTier: "simple", estimatedTokens: 150_000 }),
-		);
-		expect(result.tier).toBe("standard");
-		expect(result.signals.stickyEscalation).toBe(false);
-	});
-
-	test("equal priorTier is not sticky", () => {
-		const result = classifyComplexity(input({ priorTier: "standard", estimatedTokens: 50_000 }));
-		expect(result.tier).toBe("standard");
-		expect(result.signals.stickyEscalation).toBe(false);
-	});
-
-	test("phase transition: clean build request may downgrade complex → standard", () => {
-		// Turn 1 "帮我设计并实现一个登录功能" is complex (design phase). Turn 2
-		// is the build phase — a new phase, not the same task continuing, so
-		// sticky escalation must not pin it to complex.
-		const result = classifyComplexity(
-			input({ prompt: "开始实现登录功能", intent: CODE_INTENT, priorTier: "complex" }),
-		);
-		expect(result.tier).toBe("standard");
-		expect(result.signals.stickyEscalation).toBe(false);
-		expect(result.reasons.join(" ")).toContain("phase transition");
-	});
-
-	test("sticky holds when the session still carries repair/debug signals", () => {
-		// An ongoing debugging turn is the SAME task — no downgrade. ("修复"
-		// is repair phrasing, not implementation phrasing.)
-		const result = classifyComplexity(
-			input({ prompt: "继续排查并修复这个报错", intent: CODE_INTENT, priorTier: "complex" }),
+			input({ prompt: "refactor and migrate the entire service across modules" }),
 		);
 		expect(result.tier).toBe("complex");
-		expect(result.signals.stickyEscalation).toBe(true);
+	});
+
+	test("clean build request is classified from its own signals", () => {
+		const result = classifyComplexity(
+			input({ prompt: "开始实现登录功能", intent: CODE_INTENT }),
+		);
+		expect(result.tier).toBe("standard");
+	});
+
+	test("repair/debug request is classified at standard", () => {
+		const result = classifyComplexity(
+			input({ prompt: "继续排查并修复这个报错", intent: CODE_INTENT }),
+		);
+		expect(result.tier).toBe("standard");
 	});
 });
 

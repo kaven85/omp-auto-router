@@ -23,7 +23,7 @@ Ported from the design ideas of [pi-auto-router](https://github.com/danialranjha
 - **Restart memory**: circuit-breaker state and rolling first-visible-output latency persist (`circuit.json` / `first-output-latency.json`) for warm starts
 - **Env switches** (neutral names; legacy `OMP_AUTO_ROUTER_*` / `PI_AUTO_ROUTER_*` spellings still work as aliases): `AUTO_ROUTER_UVI_HARD=1` (exclude stressed-UVI providers), `AUTO_ROUTER_CONFIDENCE_THRESHOLD=<0..1>` (classifier confidence gate, default 0.45), `AUTO_ROUTER_COOLDOWN_MS=<ms>` (post-failure target cooldown, default 60000, floor 5000), `AUTO_ROUTER_QUOTA_REFRESH_MS=<ms>` (quota refresh cadence, default 30000, floor 10000), `AUTO_ROUTER_LLM_ADJUDICATE=0|false` (disable LLM adjudication of mixed-phase prompts, default on)
 - **Background quota refresh**: UVI quota snapshots refresh every 30s in the background (host-managed timer), so requests never block on an expired cache
-- **Dashboard widget**: after each decision a profile/target/first-visible-output latency/budget/circuit/UVI/cache-hit-rate overview is rendered via `setWidget` (`cache: <provider> hit N.NN% · read X · write Y`, hit rate = cacheRead / all prompt tokens, aggregated per provider; degrades silently when the host lacks `setWidget`)
+- **Dashboard widget**: after each decision a profile/target/first-visible-output latency/budget/circuit/UVI/cache-hit-rate overview is rendered via `setWidget` (`cache: <provider> hit N.NN% · read X`, plus `· write Y` when cache writes are reported, hit rate = cacheRead / all prompt tokens, aggregated per provider; degrades silently when the host lacks `setWidget`)
 - **Provider registry**: provider-specific knowledge (Kimi window labels, DeepSeek balance endpoint, per-model thinking ranges) lives in `provider-registry.ts`; target-level `balanceEndpoint` / `thinkingCap` override the defaults
 - **Log rotation**: the event log truncates to its newest half past ~2 MB; daily budget buckets are kept for 62 days (monthly rollups indefinitely)
 - **Analytics script**: `bun scripts/routing-stats.ts [--host omp|pi] [path]` aggregates the event log (decisions per profile/tier/target, failovers, top errors); `--host pi` reads the Pi state directory
@@ -413,7 +413,7 @@ modelRoles:
 Rules:
 
 - **Fixed chain** (`targets`): every request of this role takes this failover chain verbatim — no classification, no LLM adjudication; `thinking` overridable.
-- **Soft clamp** (`tierFloor` / `tierCap`): classification runs as usual (sticky escalation, test-failure escalation included); the result is clamped into the band.
+- **Soft clamp** (`tierFloor` / `tierCap`): classify each request from its current task, then clamp the result into the band (test-failure escalation still applies).
 - **Pin escape**: `@fast` / `@swe` / `@reasoning` always win — even on a fixed-chain role, a pin jumps out of the chain into the classified tier's chain.
 - Undeclared roles route as `default`; `roles.default` can clamp the main session itself (e.g. `tierFloor: simple` keeps it off trivial).
 - LLM adjudication only runs for the `default` role — task/smol etc. skip that extra call.
@@ -427,7 +427,9 @@ Rules:
 | `trivial` | short Q&A (judged on the prompt, independent of context length), no code | thinking low |
 | `simple` | single-file edits, explanations, grep-like | thinking low |
 | `standard` | code blocks, multi-file paths, diffs, implementation phrasing, long/epic context | thinking medium |
-| `complex` | refactor/migration/architecture keywords, multi-turn same-task | thinking high |
+| `complex` | refactor/migration/architecture keywords, multi-step tasks | thinking high |
+
+- Each request is classified independently from its current task complexity, so the tier can move up or down within a session. A previous tier does not lock subsequent requests; recent test failures may temporarily raise the next request's floor.
 
 > **Split analysis**: the prompt is split into a phase sequence by phase conjunctions (`并/然后/接着/随后/再`, `and/then`) and sentence boundaries, and **the first phase sets the tier** — later phases are classified when their own turn arrives, so the tier flows with the phases. "帮我设计并实现一个登录功能" starts with design → complex (the build turn lands standard later: complex→standard); "实现支付逻辑，然后设计对账方案" starts with the build → standard (the design turn escalates: standard→complex); "按设计方案实现支付逻辑" is a single phase building on an existing plan → standard. Hard scope words (`重构/迁移/架构/跨文件`, `refactor/migrate/rewrite`) only count inside the first phase.
 >

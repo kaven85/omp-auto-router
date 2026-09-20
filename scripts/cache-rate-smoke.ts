@@ -98,7 +98,7 @@ console.log("\n── after turn 2 (deepseek settled, 9k fresh, no cache) ──
 const lines2 = buildWidgetLines(state, state.lastDecision?.decision);
 console.log(lines2.join("\n"));
 const cacheLine2 = lines2.find((line) => line.startsWith("cache:"));
-if (cacheLine2 !== "cache: deepseek hit 0.00% · read 0 · write 0") throw new Error(`unexpected cache line: ${cacheLine2}`);
+if (cacheLine2 !== "cache: deepseek hit 0.00% · read 0") throw new Error(`unexpected cache line: ${cacheLine2}`);
 
 rmSync(dir, { recursive: true, force: true });
 console.log("\nSMOKE OK — cache-rate line verified through the real stream → recordUsage → widget path");

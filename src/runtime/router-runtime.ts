@@ -153,10 +153,11 @@ export class RouterRuntime {
 		const quota = await this.fetchQuota(allTargets);
 		const candidates = await this.host.candidatesFor(allTargets, this.state.cooldowns);
 		const estimatedTokens = request.estimatedTokens ?? estimateContextTokens(request.context);
-		let priorTier = this.state.decisions.last()?.tier;
+		let tierFloor: ComplexityTier | undefined;
+		const priorTier = this.state.decisions.last()?.tier;
 		if (this.state.testFailureAt !== undefined && this.now() - this.state.testFailureAt < TEST_FAILURE_ESCALATION_MS && priorTier !== "complex") {
 			const floor = priorTier ?? "simple";
-			priorTier = COMPLEXITY_TIERS[Math.min(COMPLEXITY_TIERS.indexOf(floor) + 1, COMPLEXITY_TIERS.length - 1)];
+			tierFloor = COMPLEXITY_TIERS[Math.min(COMPLEXITY_TIERS.indexOf(floor) + 1, COMPLEXITY_TIERS.length - 1)];
 		}
 
 		// LLM adjudication: mixed-phase prompts ("设计并实现 X") are
@@ -175,7 +176,6 @@ export class RouterRuntime {
 				hasImages: request.hasImages ?? hasImages,
 				intent: classifyIntent(shortcut.cleanPrompt),
 				shortcut,
-				...(priorTier !== undefined ? { priorTier } : {}),
 				overrides: this.state.classifierOverrides,
 			});
 			if (pre.signals.mixedPhase) {
@@ -205,7 +205,7 @@ export class RouterRuntime {
 				profile: requestedProfile,
 				role,
 				hasImages: request.hasImages ?? hasImages,
-				...(priorTier ? { priorTier } : {}),
+				...(tierFloor ? { tierFloor } : {}),
 				candidates,
 				quota,
 				estimatedTokens,

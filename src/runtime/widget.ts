@@ -66,6 +66,8 @@ export function buildWidgetLines(state: RouterRuntimeState, decision?: RoutingDe
 	// Prompt-cache hit rate for the current provider, aggregated over its
 	// models: cacheRead / all prompt tokens processed (fresh + hit + write).
 	// `input` is fresh-only prompt tokens on Anthropic-style hosts (pi-ai).
+	// OpenAI-compatible providers never report cache-creation tokens, so the
+	// write segment only renders when a host actually reported writes.
 	if (currentProvider !== undefined) {
 		let fresh = 0;
 		let read = 0;
@@ -79,7 +81,8 @@ export function buildWidgetLines(state: RouterRuntimeState, decision?: RoutingDe
 		const total = fresh + read + written;
 		if (total > 0) {
 			const hit = ((read / total) * 100).toFixed(2);
-			lines.push(`cache: ${currentProvider} hit ${hit}% · read ${read.toLocaleString()} · write ${written.toLocaleString()}`);
+			const write = written > 0 ? ` · write ${written.toLocaleString()}` : "";
+			lines.push(`cache: ${currentProvider} hit ${hit}% · read ${read.toLocaleString()}${write}`);
 		}
 	}
 	return lines;

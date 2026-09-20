@@ -27,7 +27,6 @@ function makeDecision(decidedAt: number, profile = "default"): RoutingDecision {
 					multiStep: false,
 					mechanicalOp: false,
 					shortQa: false,
-					stickyEscalation: false,
 					hasImages: false,
 				},
 				reasons: [],

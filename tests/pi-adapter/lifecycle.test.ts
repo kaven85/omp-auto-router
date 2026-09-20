@@ -41,7 +41,7 @@ function decisionFixture(overrides: Partial<RoutingDecision> = {}): RoutingDecis
 				tier: "standard",
 				confidence: 0.8,
 				reasons: [],
-				signals: { estimatedTokens: 10, codeSignals: [], repairDebug: false, implementation: false, mixedPhase: false, multiStep: false, mechanicalOp: false, shortQa: false, stickyEscalation: false, hasImages: false },
+				signals: { estimatedTokens: 10, codeSignals: [], repairDebug: false, implementation: false, mixedPhase: false, multiStep: false, mechanicalOp: false, shortQa: false, hasImages: false },
 			},
 		},
 		decidedAt: Date.now(),
