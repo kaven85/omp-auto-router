@@ -2,9 +2,13 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-28
+
 ### Added
 
 - **仪表盘 widget 新增缓存率行**：UVI 行后渲染 `cache: <provider> hit N.NN% · read X`，有缓存写入时追加 `· write Y`，按当前 provider 聚合其所有模型的会话内 prompt token（fresh / cacheRead / cacheWrite）。命中率 = cacheRead / (input + cacheRead + cacheWrite)，与 pi-ai 的 Anthropic 风格 usage 语义一致（`input` 不含缓存 token）。数据来自 `recordUsage` 新累计的 `sessionUsage.inputTokens/cacheRead/cacheWrite`，shadow 模式下不计入。
+- **熔断状态跨会话持久化 + half-open 试探租约**：circuit 记录携带 `updatedAt`，成功写入 tombstone 而非删除，共享状态文件合并不会复活其他会话已消除的故障；`mergeSnapshot` 按 key 保留最新记录并清理 24h 前 tombstone，`persistRuntimeTrackers` 对 `circuit.json` 原子 read-modify-write。`tryAcquireTrial`/`releaseTrial` 进程内租约使单个 half-open 探测在并发请求间原子；租约改为在 host 真正打开 provider 流时才预留（`deferTrialReservation`），不再因排队在 OMP host 全局流锁后而误判；忙碌租约是路由内部并发控制而非 provider 故障，不再重开熔断或翻倍退避。circuit-open 排除原因现在提示 retry-in 秒数；`/auto-router reset` 同时清除熔断（以 tombstone 形式）与 cooldown 并立即持久化，两个 adapter 均接入 `persistTrackers`。
+- **某层无可用目标时跨层可用性回退**：当一层所有目标都熔断/冷却/预算阻断时，不再让整个 profile 失败——pipeline 按剩余声明层回退，先向上（受升级上限与 role tierFloor 约束）再向下，采用第一个有可用候选的层。运行在 capability 升级之后，必需 capability 仍优先最近的更高 capable 层；固定 targets 链保持严格不回退。
 
 ### Fixed
 
